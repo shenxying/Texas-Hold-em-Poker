@@ -1,3 +1,5 @@
+import type { Settlement } from './pots';
+
 export type Suit = 'c' | 'd' | 'h' | 's';
 export type Rank = 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
 
@@ -86,7 +88,12 @@ export type GameEvent =
   | { type: 'blind-posted'; playerId: string; amount: number; blind: 'small' | 'big' }
   | { type: 'player-acted'; action: PlayerAction }
   | { type: 'street-advanced'; street: Exclude<Street, 'preflop' | 'complete'>; cards: Card[] }
-  | { type: 'uncontested-awarded'; playerId: string; amount: number };
+  | { type: 'uncontested-awarded'; playerId: string; amount: number }
+  | {
+      type: 'hand-settled';
+      settlement: Settlement;
+      revealedHands: Array<{ playerId: string; cards: Card[] }>;
+    };
 
 export interface HandTransition {
   state: HandState;

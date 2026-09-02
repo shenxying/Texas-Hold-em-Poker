@@ -1,5 +1,6 @@
 import { applyBettingAction, GameRuleError, getLegalActions } from './betting';
 import { createDeck, shuffleDeck } from './cards';
+import { settleShowdown } from './pots';
 import type {
   Card,
   GameEvent,
@@ -217,6 +218,22 @@ function awardUncontested(state: HandState, events: GameEvent[]): void {
   events.push({ type: 'uncontested-awarded', playerId: winner.id, amount });
 }
 
+function settleContested(state: HandState, events: GameEvent[]): void {
+  const settlement = settleShowdown(state);
+  for (const [playerId, amount] of Object.entries(settlement.payouts)) {
+    const player = state.players.find((candidate) => candidate.id === playerId)!;
+    player.stack += amount;
+  }
+  const revealedPlayerIds = new Set(settlement.revealedPlayerIds);
+  const revealedHands = state.players
+    .filter((player) => revealedPlayerIds.has(player.id))
+    .map((player) => ({ playerId: player.id, cards: cloneCards(player.holeCards) }));
+
+  state.street = 'complete';
+  state.actorId = null;
+  events.push({ type: 'hand-settled', settlement, revealedHands });
+}
+
 export function advanceAutomatic(input: HandState): HandTransition {
   const state = cloneState(input);
   const events: GameEvent[] = [];
@@ -230,6 +247,10 @@ export function advanceAutomatic(input: HandState): HandTransition {
       break;
     }
     advanceStreet(state, events);
+  }
+
+  if (state.street === 'showdown') {
+    settleContested(state, events);
   }
 
   return { state, events };
