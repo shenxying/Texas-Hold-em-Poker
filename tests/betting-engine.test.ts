@@ -106,6 +106,51 @@ describe('betting engine', () => {
     expect(state.actorId).toBeNull();
   });
 
+  it('runs out blind-created heads-up all-in state without exposing a dry-side-pot action', () => {
+    const state = createHand({
+      seats: [
+        { id: 'p1', stack: 50 },
+        { id: 'p2', stack: 10_000 },
+      ],
+      dealerIndex: 0,
+      smallBlind: 50,
+      bigBlind: 100,
+      randomInt: () => 0,
+    });
+
+    expect(state.street).toBe('showdown');
+    expect(state.board).toHaveLength(5);
+    expect(state.actorId).toBeNull();
+    expect(getLegalActions(state, 'p2')).toMatchObject({
+      canRaise: false,
+      canAllIn: false,
+    });
+  });
+
+  it('runs out a multi-player hand when actions leave one matched non-all-in player', () => {
+    let state = createHand({
+      seats: [
+        { id: 'p1', stack: 100 },
+        { id: 'p2', stack: 100 },
+        { id: 'p3', stack: 10_000 },
+      ],
+      dealerIndex: 0,
+      smallBlind: 50,
+      bigBlind: 100,
+      randomInt: () => 0,
+    });
+    state = applyAction(state, { playerId: 'p1', type: 'all-in' }).state;
+    state = applyAction(state, { playerId: 'p2', type: 'all-in' }).state;
+
+    expect(state.street).toBe('showdown');
+    expect(state.board).toHaveLength(5);
+    expect(state.actorId).toBeNull();
+    expect(getLegalActions(state, 'p3')).toMatchObject({
+      canRaise: false,
+      canAllIn: false,
+    });
+  });
+
   it('runs out the board when only one non-all-in player remains and no call is owed', () => {
     const headsUpSeats = [
       { id: 'p1', stack: 100 },

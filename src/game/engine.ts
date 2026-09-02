@@ -150,7 +150,7 @@ export function createHand(config: HandConfig): HandState {
     : nextIndex(players, bigBlindIndex);
   const firstActorIndex = findNextActorIndex(partialState, firstActorStart);
   partialState.actorId = firstActorIndex === null ? null : players[firstActorIndex]!.id;
-  return partialState;
+  return advanceAutomatic(partialState).state;
 }
 
 function nonFoldedPlayers(state: HandState): HandPlayer[] {
