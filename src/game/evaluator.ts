@@ -17,22 +17,7 @@ interface RankGroup {
   count: number;
 }
 
-function straightHigh(ranks: readonly number[]): number | null {
-  const uniqueDescending = [...new Set(ranks)].sort((a, b) => b - a);
-  if (uniqueDescending.length !== 5) {
-    return null;
-  }
-
-  if (uniqueDescending.join(',') === '14,5,4,3,2') {
-    return 5;
-  }
-
-  const high = uniqueDescending[0]!;
-  const low = uniqueDescending[4]!;
-  return high - low === 4 ? high : null;
-}
-
-function rankGroups(cards: readonly Card[]): RankGroup[] {
+function getRankGroups(cards: readonly Card[]): RankGroup[] {
   const counts = new Map<number, number>();
   for (const card of cards) {
     counts.set(card.rank, (counts.get(card.rank) ?? 0) + 1);
@@ -43,7 +28,37 @@ function rankGroups(cards: readonly Card[]): RankGroup[] {
     .sort((a, b) => b.count - a.count || b.rank - a.rank);
 }
 
-function handRank(category: HandCategory, kickers: number[], cards: readonly Card[]): HandRank {
+function getStraightHigh(ranks: readonly number[]): number | null {
+  const descending = [...new Set(ranks)].sort((a, b) => b - a);
+  if (descending.length !== 5) {
+    return null;
+  }
+
+  if (
+    descending[0] === 14 &&
+    descending[1] === 5 &&
+    descending[2] === 4 &&
+    descending[3] === 3 &&
+    descending[4] === 2
+  ) {
+    return 5;
+  }
+
+  const high = descending[0]!;
+  for (let index = 1; index < descending.length; index += 1) {
+    if (descending[index] !== high - index) {
+      return null;
+    }
+  }
+
+  return high;
+}
+
+function rankedHand(
+  category: HandCategory,
+  kickers: number[],
+  cards: readonly Card[],
+): HandRank {
   return {
     category,
     categoryValue: CATEGORY_VALUE[category],
@@ -54,32 +69,32 @@ function handRank(category: HandCategory, kickers: number[], cards: readonly Car
 
 function evaluateFive(cards: readonly Card[]): HandRank {
   const ranksDescending = cards.map((card) => card.rank).sort((a, b) => b - a);
-  const groups = rankGroups(cards);
+  const groups = getRankGroups(cards);
   const flush = cards.every((card) => card.suit === cards[0]!.suit);
-  const highStraight = straightHigh(ranksDescending);
+  const straightHigh = getStraightHigh(ranksDescending);
 
-  if (flush && highStraight !== null) {
-    return handRank('straight-flush', [highStraight], cards);
+  if (flush && straightHigh !== null) {
+    return rankedHand('straight-flush', [straightHigh], cards);
   }
 
   const quads = groups.find((group) => group.count === 4);
   if (quads) {
     const kicker = groups.find((group) => group.count === 1)!.rank;
-    return handRank('quads', [quads.rank, kicker], cards);
+    return rankedHand('quads', [quads.rank, kicker], cards);
   }
 
   const trips = groups.find((group) => group.count === 3);
   const pair = groups.find((group) => group.count === 2);
   if (trips && pair) {
-    return handRank('full-house', [trips.rank, pair.rank], cards);
+    return rankedHand('full-house', [trips.rank, pair.rank], cards);
   }
 
   if (flush) {
-    return handRank('flush', ranksDescending, cards);
+    return rankedHand('flush', ranksDescending, cards);
   }
 
-  if (highStraight !== null) {
-    return handRank('straight', [highStraight], cards);
+  if (straightHigh !== null) {
+    return rankedHand('straight', [straightHigh], cards);
   }
 
   if (trips) {
@@ -87,7 +102,7 @@ function evaluateFive(cards: readonly Card[]): HandRank {
       .filter((group) => group.count === 1)
       .map((group) => group.rank)
       .sort((a, b) => b - a);
-    return handRank('trips', [trips.rank, ...kickers], cards);
+    return rankedHand('trips', [trips.rank, ...kickers], cards);
   }
 
   const pairs = groups
@@ -96,7 +111,7 @@ function evaluateFive(cards: readonly Card[]): HandRank {
     .sort((a, b) => b - a);
   if (pairs.length === 2) {
     const kicker = groups.find((group) => group.count === 1)!.rank;
-    return handRank('two-pair', [pairs[0]!, pairs[1]!, kicker], cards);
+    return rankedHand('two-pair', [pairs[0]!, pairs[1]!, kicker], cards);
   }
 
   if (pairs.length === 1) {
@@ -104,18 +119,17 @@ function evaluateFive(cards: readonly Card[]): HandRank {
       .filter((group) => group.count === 1)
       .map((group) => group.rank)
       .sort((a, b) => b - a);
-    return handRank('pair', [pairs[0]!, ...kickers], cards);
+    return rankedHand('pair', [pairs[0]!, ...kickers], cards);
   }
 
-  return handRank('high-card', ranksDescending, cards);
+  return rankedHand('high-card', ranksDescending, cards);
 }
 
 export function compareHands(a: HandRank, b: HandRank): number {
   const aScore = [a.categoryValue, ...a.kickers];
   const bScore = [b.categoryValue, ...b.kickers];
-  const scoreLength = Math.max(aScore.length, bScore.length);
 
-  for (let index = 0; index < scoreLength; index += 1) {
+  for (let index = 0; index < Math.max(aScore.length, bScore.length); index += 1) {
     const difference = (aScore[index] ?? 0) - (bScore[index] ?? 0);
     if (difference !== 0) {
       return difference;
@@ -130,18 +144,16 @@ export function evaluateSeven(cards: readonly Card[]): HandRank {
     throw new Error(`Expected exactly 7 cards, received ${cards.length}`);
   }
 
-  const uniqueCards = new Set(cards.map((card) => `${card.rank}${card.suit}`));
-  if (uniqueCards.size !== cards.length) {
+  if (new Set(cards.map((card) => `${card.rank}${card.suit}`)).size !== 7) {
     throw new Error('Expected 7 unique cards');
   }
 
   let best: HandRank | null = null;
   for (let firstExcluded = 0; firstExcluded < 6; firstExcluded += 1) {
     for (let secondExcluded = firstExcluded + 1; secondExcluded < 7; secondExcluded += 1) {
-      const fiveCards = cards.filter(
-        (_, index) => index !== firstExcluded && index !== secondExcluded,
+      const candidate = evaluateFive(
+        cards.filter((_, index) => index !== firstExcluded && index !== secondExcluded),
       );
-      const candidate = evaluateFive(fiveCards);
       if (best === null || compareHands(candidate, best) > 0) {
         best = candidate;
       }

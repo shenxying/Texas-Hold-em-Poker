@@ -20,12 +20,8 @@ const RANK_BY_SYMBOL: Readonly<Record<string, Rank>> = {
 
 export function parseCard(text: string): Card {
   const match = /^([2-9TJQKA])([cdhs])$/.exec(text);
-  if (!match) {
-    throw new Error(`Invalid card: ${text}`);
-  }
-
-  const rank = RANK_BY_SYMBOL[match[1]!];
-  if (rank === undefined) {
+  const rank = match ? RANK_BY_SYMBOL[match[1]!] : undefined;
+  if (!match || rank === undefined) {
     throw new Error(`Invalid card: ${text}`);
   }
 
