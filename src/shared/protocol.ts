@@ -54,3 +54,74 @@ export interface TableView {
   waitingPosition?: number;
   messages: ChatMessage[];
 }
+
+export interface CommandError {
+  code: string;
+  message: string;
+}
+
+export type CommandResponse<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: CommandError };
+
+export type CommandAck<T> = (response: CommandResponse<T>) => void;
+
+export interface SessionInfo {
+  roomCode: string;
+  sessionToken: string;
+  playerId: string;
+  waitingPosition?: number;
+}
+
+export type ClientPlayerAction =
+  | { type: 'fold' | 'check' | 'call' | 'all-in' }
+  | { type: 'bet' | 'raise'; amount: number };
+
+export interface ClientToServerEvents {
+  'room:create': (
+    input: { nickname: string; settings?: Partial<RoomSettings> },
+    ack: CommandAck<SessionInfo>,
+  ) => void;
+  'room:join': (
+    input: { roomCode: string; nickname: string },
+    ack: CommandAck<SessionInfo>,
+  ) => void;
+  'room:reconnect': (
+    input: { sessionToken: string },
+    ack: CommandAck<SessionInfo>,
+  ) => void;
+  'room:update-settings': (
+    input: { settings: Partial<RoomSettings> },
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'room:add-bot': (
+    input: { style: BotStyle },
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'room:remove-bot': (
+    input: { playerId: string },
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'room:reset-stack': (
+    input: { playerId: string },
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'game:start': (
+    input: Record<string, never>,
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'game:act': (
+    input: ClientPlayerAction,
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
+  'chat:send': (
+    input: { text: string },
+    ack: CommandAck<{ message: ChatMessage }>,
+  ) => void;
+}
+
+export interface ServerToClientEvents {
+  'table:snapshot': (view: TableView) => void;
+  'command:error': (error: CommandError) => void;
+  'session:replaced': (input: { roomCode: string }) => void;
+}
