@@ -158,6 +158,18 @@ function allHumans(room: Room): RoomPlayer[] {
   return [...seatedPlayers(room), ...room.waiting].filter((player) => !player.isBot);
 }
 
+function firstAvailableBotNickname(room: Room): string {
+  const nicknameKeys = new Set(
+    [...seatedPlayers(room), ...room.waiting].map(
+      (player) => normalizeNickname(player.nickname).key,
+    ),
+  );
+  for (let number = 1; ; number += 1) {
+    const nickname = `Bot ${number}`;
+    if (!nicknameKeys.has(nickname.toLowerCase())) return nickname;
+  }
+}
+
 function waitingPosition(room: Room, player: RoomPlayer): number | undefined {
   const index = room.waiting.indexOf(player);
   return index === -1 ? undefined : index + 1;
@@ -320,7 +332,7 @@ export class RoomService {
     const id = this.nextPlayerId('bot');
     room.seats[seatIndex] = {
       id,
-      nickname: `Bot ${id.slice(4)}`,
+      nickname: firstAvailableBotNickname(room),
       seatIndex,
       stack: room.settings.startingStack,
       connected: true,
@@ -404,6 +416,19 @@ export class RoomService {
         playerId: human.id,
         seatIndex,
       });
+    }
+    if (room.hostPlayerId === undefined) {
+      const nextHost = seatedPlayers(room)
+        .filter((player) => !player.isBot && player.connected)
+        .sort((left, right) => left.joinedOrder - right.joinedOrder)[0];
+      if (nextHost) {
+        room.hostPlayerId = nextHost.id;
+        events.push({
+          type: 'host-transferred',
+          roomCode: room.code,
+          playerId: nextHost.id,
+        });
+      }
     }
     return events;
   }

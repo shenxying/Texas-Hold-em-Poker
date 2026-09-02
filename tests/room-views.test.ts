@@ -230,4 +230,40 @@ describe('room service and views', () => {
     room.phase = 'playing';
     expectCode(() => rooms.resetStack(host.sessionToken, guest.playerId), 'HAND_IN_PROGRESS');
   });
+
+  it('chooses the first normalized-unique Bot N nickname', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: ' bOt 2 ' });
+
+    rooms.addBot(host.sessionToken, 'balanced');
+    const nicknames = rooms.getRoom(host.roomCode)!.seats
+      .filter((player) => player !== null)
+      .map((player) => player!.nickname);
+
+    expect(nicknames).toEqual(['bOt 2', 'Bot 1']);
+    expect(new Set(nicknames.map((nickname) => nickname.toLowerCase())).size).toBe(2);
+  });
+
+  it('assigns host to a surviving waiter promoted after the prior host expires during play', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    for (let index = 0; index < 8; index += 1) {
+      rooms.addBot(host.sessionToken, 'balanced');
+    }
+    const waiter = rooms.joinRoom({ roomCode: host.roomCode, nickname: '等待玩家' });
+    const room = rooms.getRoom(host.roomCode)!;
+    room.phase = 'playing';
+
+    rooms.disconnect(host.sessionToken, 0);
+    rooms.expireDisconnected(300_000);
+    expect(room.hostPlayerId).toBeUndefined();
+
+    room.phase = 'between-hands';
+    rooms.completeHand(room.code);
+    rooms.updateSettings(waiter.sessionToken, { bigBlind: 200 });
+
+    expect(room.seats[0]).toMatchObject({ id: waiter.playerId, isBot: false });
+    expect(room.hostPlayerId).toBe(waiter.playerId);
+    expect(room.settings.bigBlind).toBe(200);
+  });
 });
