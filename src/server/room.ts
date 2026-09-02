@@ -258,9 +258,17 @@ export class RoomService {
     delete player.disconnectedAt;
     if (connectionId !== undefined) player.connectionId = connectionId;
     if (room.hostPlayerId === undefined && player.seatIndex !== null) {
-      room.hostPlayerId = seatedPlayers(room)
+      const nextHost = seatedPlayers(room)
         .filter((candidate) => !candidate.isBot && candidate.connected)
-        .sort((left, right) => left.joinedOrder - right.joinedOrder)[0]?.id;
+        .sort((left, right) => left.joinedOrder - right.joinedOrder)[0];
+      if (nextHost) {
+        room.hostPlayerId = nextHost.id;
+        this.appendSystemEvent(
+          room,
+          { type: 'host-transferred', nickname: nextHost.nickname },
+          this.now(),
+        );
+      }
     }
     return this.joinResult(
       room,

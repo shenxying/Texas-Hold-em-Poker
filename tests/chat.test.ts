@@ -156,4 +156,29 @@ describe('room chat', () => {
     expect(serialized).not.toContain('holeCards');
     expect(serialized).not.toContain('deck');
   });
+
+  it('announces exactly one host transfer when an offline survivor reconnects', () => {
+    const tokens = ['host-token', 'guest-token'];
+    const rooms = new RoomService({
+      randomCode: () => 'ABCD23',
+      randomToken: () => tokens.shift()!,
+      now: () => 100,
+    });
+    const host = rooms.createRoom({ nickname: '房主' });
+    const guest = rooms.joinRoom({ roomCode: host.roomCode, nickname: '朋友' });
+
+    rooms.disconnect(host.sessionToken, 0);
+    rooms.disconnect(guest.sessionToken, 1);
+    rooms.expireDisconnected(300_000);
+    expect(rooms.getRoom(host.roomCode)!.hostPlayerId).toBeUndefined();
+
+    rooms.reconnect(guest.sessionToken, 'guest-returned');
+    rooms.reconnect(guest.sessionToken, 'guest-returned-again');
+
+    const transfers = rooms.getRoom(host.roomCode)!.messages.filter(
+      (message) => message.kind === 'system' && message.text === '朋友 成为新房主',
+    );
+    expect(rooms.getRoom(host.roomCode)!.hostPlayerId).toBe(guest.playerId);
+    expect(transfers).toHaveLength(1);
+  });
 });
