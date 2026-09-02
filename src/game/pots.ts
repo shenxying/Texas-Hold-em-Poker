@@ -75,32 +75,32 @@ function winnersLeftOfDealer(state: HandState, winners: readonly string[]): stri
 
 export function settleShowdown(state: HandState): Settlement {
   const playersById = new Map(state.players.map((player) => [player.id, player]));
-  const payouts: Record<string, number> = {};
+  const payouts = new Map<string, number>();
   const pots = buildPots(state.players).map<SettledPot>((pot) => {
     const winnerPlayerIds = winnersForPot(pot, playersById, state.board);
     const share = Math.floor(pot.amount / winnerPlayerIds.length);
     let remainder = pot.amount % winnerPlayerIds.length;
-    const potPayouts: Record<string, number> = {};
+    const potPayouts = new Map<string, number>();
 
     for (const playerId of winnerPlayerIds) {
-      potPayouts[playerId] = share;
+      potPayouts.set(playerId, share);
     }
     for (const playerId of winnersLeftOfDealer(state, winnerPlayerIds)) {
       if (remainder === 0) {
         break;
       }
-      potPayouts[playerId]! += 1;
+      potPayouts.set(playerId, potPayouts.get(playerId)! + 1);
       remainder -= 1;
     }
-    for (const [playerId, amount] of Object.entries(potPayouts)) {
-      payouts[playerId] = (payouts[playerId] ?? 0) + amount;
+    for (const [playerId, amount] of potPayouts) {
+      payouts.set(playerId, (payouts.get(playerId) ?? 0) + amount);
     }
 
-    return { ...pot, winnerPlayerIds, payouts: potPayouts };
+    return { ...pot, winnerPlayerIds, payouts: Object.fromEntries(potPayouts) };
   });
 
   const revealedPlayerIds = state.players
     .filter((player) => !player.folded && player.totalCommitted > 0)
     .map((player) => player.id);
-  return { payouts, pots, revealedPlayerIds };
+  return { payouts: Object.fromEntries(payouts), pots, revealedPlayerIds };
 }

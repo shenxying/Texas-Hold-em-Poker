@@ -51,3 +51,22 @@ export function handAtShowdown(options: ShowdownOptions): HandState {
     bigBlind: 2,
   };
 }
+
+export function handWithMainAndSidePotWinners(): HandState {
+  return {
+    players: [
+      player('main-winner', 100, '5s 6s'),
+      player('side-winner', 300, 'Kh Kd'),
+      player('loser', 300, 'Ah Ad'),
+    ],
+    street: 'showdown',
+    currentBet: 0,
+    lastFullRaiseSize: 2,
+    actorId: null,
+    dealerIndex: 0,
+    board: '2c 3d 4h 9s Kc'.split(' ').map(parseCard),
+    deck: [],
+    smallBlind: 1,
+    bigBlind: 2,
+  };
+}
