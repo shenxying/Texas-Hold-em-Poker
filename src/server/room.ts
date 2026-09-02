@@ -1,6 +1,8 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import type { HandState } from '../game/types';
 import type { BotStyle, ChatMessage, RoomSettings } from '../shared/protocol';
+import { ChatService, systemMessageText } from './chat';
+import type { RoomSystemEvent } from './chat';
 
 const MAX_SEATS = 9;
 const DEFAULT_SETTINGS: RoomSettings = {
@@ -104,6 +106,8 @@ interface SessionRecord {
 export interface RoomServiceOptions {
   randomCode?: () => string;
   randomToken?: () => string;
+  chat?: ChatService;
+  now?: () => number;
 }
 
 function defaultRoomCode(): string {
@@ -180,12 +184,16 @@ export class RoomService {
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly randomCode: () => string;
   private readonly randomToken: () => string;
+  private readonly chat: ChatService;
+  private readonly now: () => number;
   private nextPlayerNumber = 1;
   private nextJoinOrder = 1;
 
   constructor(options: RoomServiceOptions = {}) {
     this.randomCode = options.randomCode ?? defaultRoomCode;
     this.randomToken = options.randomToken ?? (() => randomBytes(32).toString('hex'));
+    this.chat = options.chat ?? new ChatService();
+    this.now = options.now ?? Date.now;
   }
 
   createRoom(input: CreateRoomInput): JoinResult {
@@ -206,6 +214,7 @@ export class RoomService {
     };
     this.rooms.set(code, room);
     this.sessions.set(player.sessionToken!, { room, player });
+    this.appendSystemEvent(room, { type: 'player-joined', nickname: player.nickname }, this.now());
     return this.joinResult(room, player);
   }
 
@@ -238,6 +247,7 @@ export class RoomService {
       room.seats[openSeat] = player;
     }
     this.sessions.set(player.sessionToken!, { room, player });
+    this.appendSystemEvent(room, { type: 'player-joined', nickname: player.nickname }, this.now());
     return this.joinResult(room, player);
   }
 
@@ -288,16 +298,18 @@ export class RoomService {
       if (waitingIndex !== -1) room.waiting.splice(waitingIndex, 1);
       if (room.hostPlayerId === player.id) room.hostPlayerId = undefined;
       events.push({ type: 'player-left', roomCode: room.code, playerId: player.id });
+      this.appendSystemEvent(room, { type: 'player-left', nickname: player.nickname }, now);
       affectedRooms.add(room);
     }
 
     for (const room of affectedRooms) {
       if (allHumans(room).length === 0) {
         this.rooms.delete(room.code);
+        this.chat.clear(room.code);
         events.push({ type: 'room-destroyed', roomCode: room.code });
         continue;
       }
-      if (room.phase !== 'playing') events.push(...this.promoteWaiting(room));
+      if (room.phase !== 'playing') events.push(...this.promoteWaiting(room, now));
       if (room.hostPlayerId === undefined) {
         const nextHost = seatedPlayers(room)
           .filter((player) => !player.isBot && player.connected)
@@ -305,6 +317,11 @@ export class RoomService {
         if (nextHost) {
           room.hostPlayerId = nextHost.id;
           events.push({ type: 'host-transferred', roomCode: room.code, playerId: nextHost.id });
+          this.appendSystemEvent(
+            room,
+            { type: 'host-transferred', nickname: nextHost.nickname },
+            now,
+          );
         }
       }
     }
@@ -330,7 +347,7 @@ export class RoomService {
       throw new RoomRuleError('ROOM_FULL', 'Room is full');
     }
     const id = this.nextPlayerId('bot');
-    room.seats[seatIndex] = {
+    const bot: RoomPlayer = {
       id,
       nickname: firstAvailableBotNickname(room),
       seatIndex,
@@ -340,6 +357,8 @@ export class RoomService {
       botStyle: style,
       joinedOrder: this.nextJoinOrder++,
     };
+    room.seats[seatIndex] = bot;
+    this.appendSystemEvent(room, { type: 'bot-added', nickname: bot.nickname }, this.now());
   }
 
   removeBot(actorToken: string, playerId: string): void {
@@ -350,10 +369,12 @@ export class RoomService {
     if (seatIndex === -1) {
       throw new RoomRuleError('PLAYER_NOT_FOUND', 'Player does not exist');
     }
-    if (!room.seats[seatIndex]!.isBot) {
+    const bot = room.seats[seatIndex]!;
+    if (!bot.isBot) {
       throw new RoomRuleError('NOT_BOT', 'Player is not a bot');
     }
     room.seats[seatIndex] = null;
+    this.appendSystemEvent(room, { type: 'bot-removed', nickname: bot.nickname }, this.now());
   }
 
   resetStack(actorToken: string, playerId: string): void {
@@ -381,11 +402,11 @@ export class RoomService {
         if (roomPlayer) roomPlayer.stack = handPlayer.stack;
       }
     }
-    events.push(...this.promoteWaiting(room));
+    events.push(...this.promoteWaiting(room, this.now()));
     return events;
   }
 
-  private promoteWaiting(room: Room): RoomEvent[] {
+  private promoteWaiting(room: Room, now: number): RoomEvent[] {
     const events: RoomEvent[] = [];
     while (room.waiting.length > 0) {
       let seatIndex = firstOpenSeat(room);
@@ -405,6 +426,7 @@ export class RoomService {
           playerId: bot.id,
           seatIndex,
         });
+        this.appendSystemEvent(room, { type: 'bot-removed', nickname: bot.nickname }, now);
       }
 
       const human = room.waiting.shift()!;
@@ -428,6 +450,11 @@ export class RoomService {
           roomCode: room.code,
           playerId: nextHost.id,
         });
+        this.appendSystemEvent(
+          room,
+          { type: 'host-transferred', nickname: nextHost.nickname },
+          now,
+        );
       }
     }
     return events;
@@ -435,6 +462,28 @@ export class RoomService {
 
   getRoom(roomCode: string): Room | undefined {
     return this.rooms.get(normalizedRoomCode(roomCode));
+  }
+
+  sendChat(sessionToken: string, text: string, now: number): ChatMessage {
+    const { room, player } = this.requireSession(sessionToken);
+    const message = this.chat.send(
+      room.code,
+      {
+        sessionId: sessionToken,
+        playerId: player.id,
+        nickname: player.nickname,
+        seatIndex: player.seatIndex ?? -1,
+      },
+      text,
+      now,
+    );
+    room.messages = this.chat.history(room.code);
+    return message;
+  }
+
+  recordSystemEvent(roomCode: string, event: RoomSystemEvent, now: number): ChatMessage {
+    const room = this.requireRoom(roomCode);
+    return this.appendSystemEvent(room, event, now);
   }
 
   private createUniqueRoomCode(): string {
@@ -499,6 +548,12 @@ export class RoomService {
     if (room.phase === 'playing') {
       throw new RoomRuleError('HAND_IN_PROGRESS', 'This action is unavailable during a hand');
     }
+  }
+
+  private appendSystemEvent(room: Room, event: RoomSystemEvent, now: number): ChatMessage {
+    const message = this.chat.system(room.code, systemMessageText(event), now);
+    room.messages = this.chat.history(room.code);
+    return message;
   }
 
   private joinResult(

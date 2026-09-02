@@ -8,16 +8,18 @@ export interface RoomSettings {
 
 export type BotStyle = 'tight' | 'balanced' | 'aggressive';
 
+export interface ChatMessageSender {
+  playerId: string;
+  nickname: string;
+  seatIndex: number;
+}
+
 export interface ChatMessage {
   id: number;
   kind: 'player' | 'system';
   text: string;
   sentAt: number;
-  sender?: {
-    playerId: string;
-    nickname: string;
-    seatIndex: number;
-  };
+  sender?: ChatMessageSender;
 }
 
 export interface PublicPlayer {
