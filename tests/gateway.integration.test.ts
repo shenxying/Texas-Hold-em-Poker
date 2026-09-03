@@ -1,10 +1,13 @@
 import { once } from 'node:events';
 import {
   createServer,
+  get,
   type IncomingMessage,
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http';
+import { connect } from 'node:net';
+import type { Duplex } from 'node:stream';
 import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import { io, type Socket } from 'socket.io-client';
@@ -23,6 +26,7 @@ const gateways: GatewayServer[] = [];
 const pokerServers: PokerServer[] = [];
 const clients: Socket[] = [];
 const runningGateways: RunningGateway[] = [];
+const rawSockets: Duplex[] = [];
 
 async function listen(server: HttpServer): Promise<ListeningServer> {
   server.listen(0, '127.0.0.1');
@@ -72,6 +76,13 @@ async function waitForSocketConnection(client: Socket): Promise<void> {
   });
 }
 
+function waitForSocketClose(socket: Duplex): Promise<void> {
+  if (socket.destroyed) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    socket.once('close', () => resolve());
+  });
+}
+
 function echoUpstream(
   upstream: string,
   status: number,
@@ -108,6 +119,7 @@ async function startGatewayForTest(
 
 afterEach(async () => {
   for (const client of clients.splice(0)) client.disconnect();
+  for (const socket of rawSockets.splice(0)) socket.destroy();
   for (const running of runningGateways.splice(0)) await running.close();
   for (const gateway of gateways.splice(0)) await gateway.close();
   for (const server of pokerServers.splice(0)) await server.close();
@@ -221,6 +233,20 @@ describe('shared gateway HTTP routing', () => {
       });
   });
 
+  it('preserves repeated slashes in a drawing request URL byte-for-byte', async () => {
+    const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
+    const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+
+    await request(gateway.url)
+      .get('/api//v1///items?next=//keep')
+      .expect(200)
+      .expect(({ body }) => {
+        expect(body.upstream).toBe('drawing');
+        expect(body.url).toBe('/api//v1///items?next=//keep');
+      });
+  });
+
   it('preserves the poker prefix and keeps similarly named paths on drawing', async () => {
     const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
     const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
@@ -262,6 +288,31 @@ describe('shared gateway HTTP routing', () => {
     expect(response.text).not.toContain('\n    at ');
   });
 
+  it('closes a pending HTTP upstream request before close resolves', async () => {
+    let captureRequest: (requestMessage: IncomingMessage) => void = () => undefined;
+    const receivedRequest = new Promise<IncomingMessage>((resolve) => {
+      captureRequest = resolve;
+    });
+    const stalledUpstream = createServer((requestMessage) => {
+      captureRequest(requestMessage);
+    });
+    const drawing = await listen(stalledUpstream);
+    const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+    const clientRequest = get(`${gateway.url}/api/pending`);
+    clientRequest.on('error', () => undefined);
+    clientRequest.on('socket', (socket) => rawSockets.push(socket));
+    const upstreamRequest = await receivedRequest;
+    rawSockets.push(upstreamRequest.socket);
+    upstreamRequest.socket.on('error', () => undefined);
+    const upstreamClosed = waitForSocketClose(upstreamRequest.socket);
+
+    await gateway.gateway.close();
+    await upstreamClosed;
+
+    expect(upstreamRequest.socket.destroyed).toBe(true);
+  });
+
   it('closes the gateway idempotently', async () => {
     const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
     const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
@@ -277,6 +328,91 @@ describe('shared gateway HTTP routing', () => {
 });
 
 describe('shared gateway Socket.IO routing', () => {
+  it('preserves repeated slashes in a WebSocket upgrade URL byte-for-byte', async () => {
+    const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
+    let captureUrl: (url: string) => void = () => undefined;
+    const receivedUrl = new Promise<string>((resolve) => {
+      captureUrl = resolve;
+    });
+    const pokerServer = createServer();
+    pokerServer.on('upgrade', (requestMessage, socket) => {
+      socket.on('error', () => undefined);
+      captureUrl(requestMessage.url ?? '');
+      socket.end([
+        'HTTP/1.1 101 Switching Protocols',
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        '',
+        '',
+      ].join('\r\n'));
+    });
+    const poker = await listen(pokerServer);
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+    const gatewayUrl = new URL(gateway.url);
+    const client = connect({
+      host: gatewayUrl.hostname,
+      port: Number(gatewayUrl.port),
+    });
+    rawSockets.push(client);
+    await once(client, 'connect');
+
+    client.write([
+      'GET /poker/socket.io//engine///?EIO=4&transport=websocket&next=//keep HTTP/1.1',
+      `Host: ${gatewayUrl.host}`,
+      'Connection: Upgrade',
+      'Upgrade: websocket',
+      'Sec-WebSocket-Version: 13',
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      '',
+      '',
+    ].join('\r\n'));
+
+    await expect(receivedUrl).resolves.toBe(
+      '/poker/socket.io//engine///?EIO=4&transport=websocket&next=//keep',
+    );
+  });
+
+  it('closes a pending WebSocket upstream handshake before close resolves', async () => {
+    const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
+    let captureSocket: (socket: Duplex) => void = () => undefined;
+    const receivedSocket = new Promise<Duplex>((resolve) => {
+      captureSocket = resolve;
+    });
+    const stalledUpstream = createServer();
+    stalledUpstream.on('upgrade', (_requestMessage, socket) => {
+      socket.resume();
+      captureSocket(socket);
+    });
+    const poker = await listen(stalledUpstream);
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+    const gatewayUrl = new URL(gateway.url);
+    const client = connect({
+      host: gatewayUrl.hostname,
+      port: Number(gatewayUrl.port),
+    });
+    rawSockets.push(client);
+    await once(client, 'connect');
+    client.write([
+      'GET /poker/socket.io/?EIO=4&transport=websocket HTTP/1.1',
+      `Host: ${gatewayUrl.host}`,
+      'Connection: Upgrade',
+      'Upgrade: websocket',
+      'Sec-WebSocket-Version: 13',
+      'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+      '',
+      '',
+    ].join('\r\n'));
+    const upstreamSocket = await receivedSocket;
+    rawSockets.push(upstreamSocket);
+    upstreamSocket.on('error', () => undefined);
+    const upstreamClosed = waitForSocketClose(upstreamSocket);
+
+    await gateway.gateway.close();
+    await upstreamClosed;
+
+    expect(upstreamSocket.destroyed).toBe(true);
+  });
+
   it('forwards a real Socket.IO upgrade and releases it on close', async () => {
     const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
     const poker = createPokerServer({ basePath: '/poker' });

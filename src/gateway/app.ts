@@ -1,4 +1,9 @@
-import { createServer, type Server as HttpServer, type ServerResponse } from 'node:http';
+import {
+  createServer,
+  type ClientRequest,
+  type Server as HttpServer,
+  type ServerResponse,
+} from 'node:http';
 import type { Socket } from 'node:net';
 import httpProxy from 'http-proxy';
 import { normalizeBasePath } from '../shared/basePath';
@@ -35,6 +40,32 @@ export function createGateway(options: GatewayOptions): GatewayServer {
   const proxy = httpProxy.createProxyServer();
   const sockets = new Set<Socket>();
   const upstreamSockets = new Set<Socket>();
+  const proxyRequests = new Set<ClientRequest>();
+  const proxySockets = new Set<Socket>();
+  const trackProxyRequest = (proxyRequest: ClientRequest): void => {
+    proxyRequests.add(proxyRequest);
+    let proxySocket: Socket | undefined;
+    const trackProxySocket = (socket: Socket): void => {
+      proxySocket = socket;
+      proxySockets.add(socket);
+      socket.once('close', () => proxySockets.delete(socket));
+    };
+    if (proxyRequest.socket === null) {
+      proxyRequest.once('socket', trackProxySocket);
+    } else {
+      trackProxySocket(proxyRequest.socket);
+    }
+    const release = (): void => {
+      proxyRequests.delete(proxyRequest);
+    };
+    proxyRequest.once('close', release);
+    proxyRequest.once('error', release);
+    proxyRequest.once('finish', release);
+    proxyRequest.once('upgrade', () => {
+      release();
+      if (proxySocket !== undefined) proxySockets.delete(proxySocket);
+    });
+  };
   const targetFor = (requestUrl: string): URL => (
     isPathWithinBase(requestUrl, pokerBasePath)
       ? options.pokerUpstream
@@ -45,6 +76,14 @@ export function createGateway(options: GatewayOptions): GatewayServer {
     proxy.web(request, response, { target: target.href, prependPath: false }, () => {
       sendUpstreamUnavailable(response);
     });
+  });
+  proxy.on('proxyReq', (proxyRequest, request) => {
+    trackProxyRequest(proxyRequest);
+    proxyRequest.path = request.url ?? '/';
+  });
+  proxy.on('proxyReqWs', (proxyRequest, request) => {
+    trackProxyRequest(proxyRequest);
+    proxyRequest.path = request.url ?? '/';
   });
   httpServer.on('connection', (socket) => {
     sockets.add(socket);
@@ -65,18 +104,50 @@ export function createGateway(options: GatewayOptions): GatewayServer {
     socket.once('close', () => upstreamSockets.delete(socket));
   });
 
+  const destroyProxyRequest = (proxyRequest: ClientRequest): Promise<void> => {
+    if (proxyRequest.destroyed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      proxyRequest.once('close', resolve);
+      proxyRequest.destroy();
+    });
+  };
+  const resetSocket = (socket: Socket): Promise<void> => {
+    if (socket.destroyed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      socket.once('close', resolve);
+      socket.resetAndDestroy();
+    });
+  };
+  const destroySocket = (socket: Socket): Promise<void> => {
+    if (socket.destroyed) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      socket.once('close', resolve);
+      socket.destroy();
+    });
+  };
+  const closeHttpServer = (): Promise<void> => {
+    if (!httpServer.listening) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      httpServer.close((error) => error === undefined ? resolve() : reject(error));
+    });
+  };
+
   let closePromise: Promise<void> | undefined;
   const close = (): Promise<void> => {
-    closePromise ??= new Promise<void>((resolve, reject) => {
+    closePromise ??= (async () => {
       proxy.close();
-      if (!httpServer.listening) {
-        resolve();
-        return;
-      }
-      httpServer.close((error) => error === undefined ? resolve() : reject(error));
+      const httpServerClosed = closeHttpServer();
+      const proxySocketsClosed = [...proxySockets].map(resetSocket);
+      const proxyRequestsClosed = [...proxyRequests].map(destroyProxyRequest);
+      const upstreamSocketsClosed = [...upstreamSockets].map(destroySocket);
       for (const socket of sockets) socket.destroy();
-      for (const socket of upstreamSockets) socket.destroy();
-    });
+      await Promise.all([
+        httpServerClosed,
+        ...proxySocketsClosed,
+        ...proxyRequestsClosed,
+        ...upstreamSocketsClosed,
+      ]);
+    })();
     return closePromise;
   };
 
