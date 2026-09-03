@@ -27,11 +27,14 @@ export function PokerRoom({
   onError = () => {},
 }: PokerRoomProps): React.JSX.Element {
   const [actionsOpen, setActionsOpen] = useState(true);
-  const [chatOpen, setChatOpen] = useState(false);
+  const [mobileChatOpen, setMobileChatOpen] = useState(false);
+  const [desktopChatOpen, setDesktopChatOpen] = useState(true);
+  const [chatRevealVersion, setChatRevealVersion] = useState(0);
   const [startPending, setStartPending] = useState(false);
   const me = view.players.find((player) => player.id === playerId);
   const potTotal = view.pots.reduce((total, pot) => total + pot.amount, 0);
-  const canStart = me?.isHost === true && view.phase !== 'playing' && view.players.length >= 2;
+  const canStart = me?.isHost === true && view.phase !== 'playing' &&
+    view.players.filter((player) => player.stack > 0).length >= 2;
 
   async function report(operation: () => Promise<unknown>): Promise<void> {
     try {
@@ -59,6 +62,16 @@ export function PokerRoom({
       onError(errorText(error));
       throw error;
     });
+  }
+
+  function toggleDesktopChat(): void {
+    if (!desktopChatOpen) setChatRevealVersion((version) => version + 1);
+    setDesktopChatOpen((open) => !open);
+  }
+
+  function openMobileChat(): void {
+    setMobileChatOpen(true);
+    setChatRevealVersion((version) => version + 1);
   }
 
   return (
@@ -103,24 +116,41 @@ export function PokerRoom({
         </aside>
       )}
 
-      <button
-        className="drawer-toggle chat-toggle"
-        type="button"
-        aria-expanded={chatOpen}
-        onClick={() => setChatOpen((open) => !open)}
-      >
-        {chatOpen ? '关闭聊天' : '打开聊天'}
-      </button>
-      <aside
-        className={`chat-drawer${chatOpen ? ' open' : ''}`}
-        {...(chatOpen ? { role: 'dialog' as const, 'aria-label': '房间聊天' } : {})}
-      >
-        <ChatPanel
-          messages={view.messages}
-          disabled={!connected}
-          onSend={sendChat}
-        />
-      </aside>
+      <div className="chat-column">
+        <button
+          className="desktop-chat-toggle"
+          type="button"
+          aria-expanded={desktopChatOpen}
+          onClick={toggleDesktopChat}
+        >
+          {desktopChatOpen ? '收起桌面聊天' : '展开桌面聊天'}
+        </button>
+        <button
+          className="mobile-chat-toggle"
+          type="button"
+          aria-expanded={mobileChatOpen}
+          onClick={() => mobileChatOpen ? setMobileChatOpen(false) : openMobileChat()}
+        >
+          {mobileChatOpen ? '关闭移动聊天' : '打开移动聊天'}
+        </button>
+        <aside
+          className={`chat-drawer${desktopChatOpen ? '' : ' desktop-closed'}${mobileChatOpen ? ' mobile-open' : ''}`}
+          data-testid="chat-drawer"
+          {...(mobileChatOpen ? { role: 'dialog' as const, 'aria-label': '房间聊天' } : {})}
+        >
+          {mobileChatOpen && (
+            <button className="chat-dialog-close" type="button" onClick={() => setMobileChatOpen(false)}>
+              关闭聊天面板
+            </button>
+          )}
+          <ChatPanel
+            messages={view.messages}
+            disabled={!connected}
+            onSend={sendChat}
+            revealVersion={chatRevealVersion}
+          />
+        </aside>
+      </div>
     </section>
   );
 }

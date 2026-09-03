@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActionBar } from '../src/client/ActionBar';
@@ -113,12 +113,12 @@ describe('poker table privacy and presentation', () => {
   it('renders nine fixed seats, public table state, blind markers, and only the viewer hand face up', () => {
     render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
 
-    expect(screen.getAllByTestId(/^seat-/)).toHaveLength(9);
+    expect(screen.getAllByTestId(/^seat-\d$/)).toHaveLength(9);
     expect(screen.getByText('总底池 750')).toBeInTheDocument();
     expect(screen.getByText('边池 150')).toBeInTheDocument();
-    expect(screen.getByText('庄家')).toBeInTheDocument();
-    expect(screen.getByText('小盲')).toBeInTheDocument();
-    expect(screen.getByText('大盲')).toBeInTheDocument();
+    expect(within(screen.getByTestId('seat-0')).getByText('庄家')).toBeInTheDocument();
+    expect(within(screen.getByTestId('seat-3')).getByText('小盲')).toBeInTheDocument();
+    expect(within(screen.getByTestId('seat-7')).getByText('大盲')).toBeInTheDocument();
     const guestSeat = screen.getByTestId('seat-3');
     expect(within(guestSeat).getByText('朋友')).toBeInTheDocument();
     expect(within(guestSeat).getByText('筹码 2000')).toBeInTheDocument();
@@ -161,6 +161,54 @@ describe('poker table privacy and presentation', () => {
     expect(within(screen.getByTestId('seat-3')).getByText('小盲')).toBeInTheDocument();
     expect(within(screen.getByTestId('seat-7')).getByText('大盲')).toBeInTheDocument();
   });
+
+  it('keeps an independent viewer hand and complete public seat summaries for compact layouts', () => {
+    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+      players: [
+        player({ connected: false, allIn: true }),
+        player({ id: 'guest', nickname: '朋友', seatIndex: 3, isHost: false,
+          streetBet: 200, lastAction: 'raise', holeCards: undefined }),
+        player({ id: 'bot', nickname: '机器人', seatIndex: 7, isBot: true,
+          isHost: false, streetBet: 50, lastAction: 'fold', folded: true,
+          holeCards: undefined }),
+      ],
+    })} playerId="me" connected />);
+
+    const viewerHand = screen.getByRole('region', { name: '移动端我的手牌' });
+    expect(viewerHand.closest('.table-seat')).toBeNull();
+    expect(within(viewerHand).getByLabelText('红桃 A')).toBeInTheDocument();
+    expect(within(viewerHand).getByLabelText('黑桃 K')).toBeInTheDocument();
+
+    const meSummary = screen.getByTestId('seat-summary-0');
+    expect(within(meSummary).getByText('已断线')).toBeInTheDocument();
+    expect(within(meSummary).getByText('本街 100')).toBeInTheDocument();
+    expect(within(meSummary).getByText('跟注')).toBeInTheDocument();
+    expect(within(meSummary).getByText('庄家')).toBeInTheDocument();
+    expect(within(meSummary).getByText('已全下')).toBeInTheDocument();
+    expect(within(screen.getByTestId('seat-summary-3')).getByText('小盲')).toBeInTheDocument();
+    expect(within(screen.getByTestId('seat-summary-7')).getByText('大盲')).toBeInTheDocument();
+  });
+
+  it('shows every server-authorized revealed hand and keeps absent hands face down', () => {
+    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+      players: [
+        player(),
+        player({ id: 'revealed', nickname: '已摊牌', seatIndex: 3, isHost: false,
+          holeCardCount: 0, holeCards: [{ rank: 2, suit: 's' }, { rank: 3, suit: 'd' }] }),
+        player({ id: 'hidden', nickname: '未摊牌', seatIndex: 7, isHost: false,
+          holeCards: undefined }),
+      ],
+    })} playerId="me" connected />);
+
+    const revealed = screen.getByTestId('seat-3');
+    expect(within(revealed).getByLabelText('黑桃 2')).toBeInTheDocument();
+    expect(within(revealed).getByLabelText('方块 3')).toBeInTheDocument();
+    expect(within(revealed).queryByLabelText('底牌')).not.toBeInTheDocument();
+    expect(revealed.querySelector('.revealed-cards')).toBeInTheDocument();
+    const hidden = screen.getByTestId('seat-7');
+    expect(within(hidden).getAllByLabelText('底牌')).toHaveLength(2);
+    expect(hidden.querySelector('.hidden-cards')).toBeInTheDocument();
+  });
 });
 
 describe('server-authoritative action controls', () => {
@@ -197,6 +245,13 @@ describe('server-authoritative action controls', () => {
     expect(screen.getByRole('button', { name: '3/4 池 450' })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: '3/4 池 450' }));
     expect(screen.getByLabelText('下注到')).toHaveValue(450);
+    const slider = screen.getByLabelText('下注到滑块');
+    expect(slider).toHaveAttribute('type', 'range');
+    expect(slider).toHaveAttribute('min', '100');
+    expect(slider).toHaveAttribute('max', '700');
+    expect(slider).toHaveValue('450');
+    fireEvent.change(slider, { target: { value: '625' } });
+    expect(screen.getByLabelText('下注到')).toHaveValue(625);
   });
 
   it('disables the entire bar while disconnected or a command is pending', async () => {
@@ -280,6 +335,59 @@ describe('chat and responsive drawers', () => {
     expect(screen.getByLabelText('聊天消息')).toHaveValue('请再试一次');
   });
 
+  it('uses the server Unicode code-point limit so 300 emoji remain sendable', async () => {
+    const onSend = vi.fn().mockResolvedValue(undefined);
+    render(<ChatPanel messages={[]} onSend={onSend} disabled={false} />);
+    const input = screen.getByLabelText('聊天消息');
+    fireEvent.change(input, { target: { value: '😀'.repeat(301) } });
+
+    expect(Array.from((input as HTMLTextAreaElement).value)).toHaveLength(300);
+    expect(input).not.toHaveAttribute('maxlength');
+    await userEvent.click(screen.getByRole('button', { name: '发送' }));
+    expect(onSend).toHaveBeenCalledWith('😀'.repeat(300));
+  });
+
+  it('scrolls to the newest message when a hidden drawer is revealed again', () => {
+    const first = chatMessage('第一条');
+    const { container, rerender } = render(
+      <ChatPanel messages={[first]} onSend={vi.fn()} disabled={false} revealVersion={0} />,
+    );
+    const list = container.querySelector('.chat-messages') as HTMLDivElement;
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 400 });
+    Object.defineProperty(list, 'clientHeight', { configurable: true, value: 100 });
+    list.scrollTop = 40;
+    fireEvent.scroll(list);
+
+    rerender(<ChatPanel
+      messages={[first, chatMessage('抽屉关闭时到达', { id: 2 })]}
+      onSend={vi.fn()}
+      disabled={false}
+      revealVersion={0}
+    />);
+    expect(list.scrollTop).toBe(40);
+
+    rerender(<ChatPanel
+      messages={[first, chatMessage('抽屉关闭时到达', { id: 2 })]}
+      onSend={vi.fn()}
+      disabled={false}
+      revealVersion={1}
+    />);
+    expect(list.scrollTop).toBe(400);
+
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 500 });
+    rerender(<ChatPanel
+      messages={[
+        first,
+        chatMessage('抽屉关闭时到达', { id: 2 }),
+        chatMessage('重开后到达', { id: 3 }),
+      ]}
+      onSend={vi.fn()}
+      disabled={false}
+      revealVersion={1}
+    />);
+    expect(list.scrollTop).toBe(500);
+  });
+
   it('toggles the mobile action and chat drawers without hiding accessible actions', async () => {
     render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
 
@@ -288,10 +396,26 @@ describe('chat and responsive drawers', () => {
     await userEvent.click(screen.getByRole('button', { name: '展开操作区' }));
     expect(screen.getByRole('button', { name: '弃牌' })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: '打开聊天' }));
+    await userEvent.click(screen.getByRole('button', { name: '打开移动聊天' }));
     expect(screen.getByRole('dialog', { name: '房间聊天' })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: '关闭聊天' }));
+    const dialog = screen.getByRole('dialog', { name: '房间聊天' });
+    expect(within(dialog).getByRole('button', { name: '关闭聊天面板' })).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: '关闭聊天面板' }));
     expect(screen.queryByRole('dialog', { name: '房间聊天' })).not.toBeInTheDocument();
+  });
+
+  it('lets desktop users collapse and restore the right-side chat', async () => {
+    render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
+    const drawer = screen.getByTestId('chat-drawer');
+    expect(drawer.parentElement).toHaveClass('chat-column');
+    expect(within(drawer.parentElement!).getByRole('button', { name: '收起桌面聊天' }))
+      .toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: '收起桌面聊天' }));
+    expect(screen.getByRole('button', { name: '展开桌面聊天' })).toHaveAttribute('aria-expanded', 'false');
+    expect(drawer).toHaveClass('desktop-closed');
+    await userEvent.click(screen.getByRole('button', { name: '展开桌面聊天' }));
+    expect(drawer).not.toHaveClass('desktop-closed');
   });
 
   it('lets the host start the first or next hand outside active play', async () => {
@@ -305,5 +429,17 @@ describe('chat and responsive drawers', () => {
 
     await userEvent.click(screen.getByRole('button', { name: '开始游戏' }));
     expect(client.sent).toContainEqual({ command: 'game:start', input: {} });
+  });
+
+  it('does not offer start when fewer than two seated players have chips', () => {
+    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+      phase: 'lobby',
+      actorId: undefined,
+      legalActions: undefined,
+      players: [player(), player({ id: 'busted', nickname: '零筹码', seatIndex: 3,
+        stack: 0, isHost: false, holeCardCount: 0, holeCards: undefined })],
+    })} playerId="me" connected />);
+
+    expect(screen.queryByRole('button', { name: '开始游戏' })).not.toBeInTheDocument();
   });
 });

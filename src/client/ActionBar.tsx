@@ -89,6 +89,18 @@ export function ActionBar({
               onChange={(event) => setAmountText(event.target.value)}
               onBlur={() => setAmountText(String(amount))}
             />
+            <input
+              className="wager-range"
+              type="range"
+              aria-label={`${wagerLabel}滑块`}
+              min={minimum}
+              max={legalActions.maxRaiseTo}
+              step="1"
+              value={amount}
+              onChange={(event) => setAmountText(String(clamp(
+                Number(event.target.value), minimum, legalActions.maxRaiseTo,
+              )))}
+            />
             <div className="wager-shortcuts">
               {shortcuts.map((shortcut) => (
                 <button key={shortcut.label} type="button" onClick={() => setAmountText(String(shortcut.amount))}>

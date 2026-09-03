@@ -5,18 +5,36 @@ interface ChatPanelProps {
   messages: readonly ChatMessage[];
   onSend: (text: string) => Promise<unknown>;
   disabled: boolean;
+  revealVersion?: number;
 }
 
-export function ChatPanel({ messages, onSend, disabled }: ChatPanelProps): React.JSX.Element {
+const MAX_MESSAGE_CODE_POINTS = 300;
+
+function limitMessage(value: string): string {
+  return Array.from(value).slice(0, MAX_MESSAGE_CODE_POINTS).join('');
+}
+
+export function ChatPanel({
+  messages,
+  onSend,
+  disabled,
+  revealVersion = 0,
+}: ChatPanelProps): React.JSX.Element {
   const [text, setText] = useState('');
   const [pending, setPending] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
   const followNewest = useRef(true);
+  const lastRevealVersion = useRef(revealVersion);
 
   useLayoutEffect(() => {
     const list = listRef.current;
-    if (list !== null && followNewest.current) list.scrollTop = list.scrollHeight;
-  }, [messages]);
+    const wasRevealed = lastRevealVersion.current !== revealVersion;
+    if (wasRevealed) followNewest.current = true;
+    if (list !== null && (followNewest.current || wasRevealed)) {
+      list.scrollTop = list.scrollHeight;
+    }
+    lastRevealVersion.current = revealVersion;
+  }, [messages, revealVersion]);
 
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -62,9 +80,8 @@ export function ChatPanel({ messages, onSend, disabled }: ChatPanelProps): React
         <label htmlFor="chat-message">聊天消息</label>
         <textarea
           id="chat-message"
-          maxLength={300}
           value={text}
-          onChange={(event) => setText(event.target.value)}
+          onChange={(event) => setText(limitMessage(event.target.value))}
           disabled={disabled || pending}
         />
         <button type="submit" disabled={disabled || pending || text.trim().length === 0}>发送</button>
