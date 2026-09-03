@@ -196,7 +196,7 @@ describe('lobby and browser session', () => {
     expect(client.reconnect).toHaveBeenCalledTimes(1);
   });
 
-  it('announces connection loss and a replaced session without discarding server wording', async () => {
+  it('announces connection loss without discarding server wording', async () => {
     const client = new FakePokerClient();
     render(<App client={client} locationHref="http://host/" />);
 
@@ -206,11 +206,28 @@ describe('lobby and browser session', () => {
     client.publish({ type: 'command:error', error: { code: 'ROOM_FULL', message: '房间已满' } });
     expect(await screen.findByText('房间已满')).toBeInTheDocument();
 
+  });
+
+  it('preserves shared storage and makes a replaced session terminal in this tab', async () => {
+    const client = new FakePokerClient();
+    render(<App client={client} locationHref="http://host/" />);
+    await userEvent.type(screen.getByLabelText('昵称'), '房主');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+    await screen.findByText('ABCD23');
+
+    const saved = localStorage.getItem('lan-poker-session');
+    client.publish({ type: 'table:snapshot', view: tableView() });
     client.publish({ type: 'session:replaced', roomCode: 'ABCD23' });
+
     expect(await screen.findByText('此会话已在另一个页面连接')).toBeInTheDocument();
-    expect(screen.getByLabelText('昵称')).toBeDisabled();
+    expect(screen.getByText('请关闭此页面；如需在此页面继续，请重新加载。')).toBeInTheDocument();
+    expect(localStorage.getItem('lan-poker-session')).toBe(saved);
+    expect(screen.queryByLabelText('昵称')).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('初始筹码')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+
     client.publish({ type: 'connection:state', state: 'connected' });
-    await waitFor(() => expect(screen.getByLabelText('昵称')).toBeEnabled());
+    expect(screen.queryByLabelText('昵称')).not.toBeInTheDocument();
   });
 });
 

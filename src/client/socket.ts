@@ -49,19 +49,38 @@ type CommandEmitter = <Command extends PokerCommand>(
   acknowledge: CommandAck<ClientCommandData<Command>>,
 ) => void;
 
+interface TransportRecovery {
+  session: SessionInfo;
+  acknowledgementReceived: boolean;
+  snapshotReceived: boolean;
+}
+
 export class SocketPokerClient implements PokerClient {
   private readonly listeners = new Set<(event: PokerClientEvent) => void>();
   private state: ConnectionState;
+  private boundSession?: SessionInfo;
+  private recovery?: TransportRecovery;
+  private replaced = false;
 
   constructor(private readonly socket: PokerSocket) {
     this.state = socket.connected ? 'connected' : 'connecting';
-    socket.on('table:snapshot', (view) => this.publish({ type: 'table:snapshot', view }));
+    socket.on('table:snapshot', (view) => {
+      this.publish({ type: 'table:snapshot', view });
+      const recovery = this.recovery;
+      if (recovery !== undefined && recovery.session.roomCode === view.roomCode) {
+        recovery.snapshotReceived = true;
+        this.completeRecovery(recovery);
+      }
+    });
     socket.on('command:error', (error) => this.publish({ type: 'command:error', error }));
     socket.on('session:replaced', ({ roomCode }) => {
+      this.replaced = true;
+      this.recovery = undefined;
       this.publish({ type: 'session:replaced', roomCode });
     });
-    socket.on('connect', () => this.setConnectionState('connected'));
+    socket.on('connect', () => this.handleConnect());
     socket.on('disconnect', () => {
+      this.recovery = undefined;
       this.setConnectionState(socket.active ? 'reconnecting' : 'disconnected');
     });
     socket.on('connect_error', () => {
@@ -71,18 +90,18 @@ export class SocketPokerClient implements PokerClient {
   }
 
   createRoom(nickname: string, settings?: Partial<RoomSettings>): Promise<SessionInfo> {
-    return this.send('room:create', {
+    return this.rememberSession(this.send('room:create', {
       nickname,
       ...(settings === undefined ? {} : { settings }),
-    });
+    }));
   }
 
   joinRoom(roomCode: string, nickname: string): Promise<SessionInfo> {
-    return this.send('room:join', { roomCode, nickname });
+    return this.rememberSession(this.send('room:join', { roomCode, nickname }));
   }
 
   reconnect(sessionToken: string): Promise<SessionInfo> {
-    return this.send('room:reconnect', { sessionToken });
+    return this.rememberSession(this.send('room:reconnect', { sessionToken }));
   }
 
   send<Command extends PokerCommand>(
@@ -115,6 +134,54 @@ export class SocketPokerClient implements PokerClient {
   private setConnectionState(state: ConnectionState): void {
     this.state = state;
     this.publish({ type: 'connection:state', state });
+  }
+
+  private async rememberSession(pending: Promise<SessionInfo>): Promise<SessionInfo> {
+    const session = await pending;
+    this.boundSession = session;
+    return session;
+  }
+
+  private handleConnect(): void {
+    if (this.replaced) {
+      this.setConnectionState('disconnected');
+      return;
+    }
+    if (this.boundSession === undefined) {
+      this.setConnectionState('connected');
+      return;
+    }
+
+    const recovery: TransportRecovery = {
+      session: this.boundSession,
+      acknowledgementReceived: false,
+      snapshotReceived: false,
+    };
+    this.recovery = recovery;
+    this.setConnectionState('reconnecting');
+    void this.send('room:reconnect', {
+      sessionToken: recovery.session.sessionToken,
+    }).then((session) => {
+      if (this.recovery !== recovery) return;
+      this.boundSession = session;
+      recovery.session = session;
+      recovery.acknowledgementReceived = true;
+      this.completeRecovery(recovery);
+    }).catch(() => {
+      if (this.recovery !== recovery) return;
+      this.recovery = undefined;
+      this.setConnectionState('disconnected');
+    });
+  }
+
+  private completeRecovery(recovery: TransportRecovery): void {
+    if (
+      this.recovery !== recovery ||
+      !recovery.acknowledgementReceived ||
+      !recovery.snapshotReceived
+    ) return;
+    this.recovery = undefined;
+    this.setConnectionState('connected');
   }
 }
 

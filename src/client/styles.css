@@ -39,7 +39,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   padding: 3rem 0 1.5rem;
 }
 
-.lobby, .room-summary, .room-controls {
+.lobby, .room-summary, .room-controls, .replacement-panel {
   display: grid;
   gap: 1rem;
   padding: 1.5rem;

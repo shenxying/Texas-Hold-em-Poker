@@ -79,6 +79,7 @@ export function App({
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected');
   const [lobbyPending, setLobbyPending] = useState(false);
   const [restoring, setRestoring] = useState(savedSession.current !== undefined);
+  const [replaced, setReplaced] = useState(false);
 
   useEffect(() => client.subscribe((event) => {
     if (event.type === 'table:snapshot') {
@@ -93,10 +94,8 @@ export function App({
       setConnectionState(event.state);
       return;
     }
-    storage()?.removeItem(SESSION_KEY);
-    setSession(undefined);
-    setView(undefined);
-    setError('此会话已在另一个页面连接');
+    setReplaced(true);
+    setError('');
   }), [client]);
 
   useEffect(() => {
@@ -124,40 +123,49 @@ export function App({
   const statusMessage = connectionMessage(connectionState);
   return (
     <main className="app-shell">
-      {statusMessage !== '' && (
-        <p className="connection-banner" aria-live="polite">{statusMessage}</p>
-      )}
-      {error !== '' && <p className="error-banner" aria-live="polite">{error}</p>}
-
-      {session === undefined ? (
-        <Lobby
-          client={client}
-          initialRoomCode={initialRoomCode}
-          disabled={restoring || lobbyPending || connectionState !== 'connected'}
-          onPendingChange={setLobbyPending}
-          onSession={acceptSession}
-          onError={setError}
-        />
+      {replaced ? (
+        <section className="replacement-panel" aria-live="polite">
+          <h1>此会话已在另一个页面连接</h1>
+          <p>请关闭此页面；如需在此页面继续，请重新加载。</p>
+        </section>
       ) : (
-        <section className="room-summary" aria-labelledby="room-title">
-          <h1 id="room-title">私人房间</h1>
-          <p>房间码</p>
-          <strong className="room-code">{session.roomCode}</strong>
-          <label htmlFor="invite-url">邀请链接</label>
-          <input id="invite-url" readOnly value={inviteFor(locationHref, session.roomCode)} />
-          {session.waitingPosition !== undefined && (
-            <p aria-live="polite">当前等待位置：{session.waitingPosition}</p>
+        <>
+          {statusMessage !== '' && (
+            <p className="connection-banner" aria-live="polite">{statusMessage}</p>
           )}
-          {view !== undefined && (
-            <RoomControls
+          {error !== '' && <p className="error-banner" aria-live="polite">{error}</p>}
+
+          {session === undefined ? (
+            <Lobby
               client={client}
-              view={view}
-              playerId={session.playerId}
-              connected={connectionState === 'connected'}
+              initialRoomCode={initialRoomCode}
+              disabled={restoring || lobbyPending || connectionState !== 'connected'}
+              onPendingChange={setLobbyPending}
+              onSession={acceptSession}
               onError={setError}
             />
+          ) : (
+            <section className="room-summary" aria-labelledby="room-title">
+              <h1 id="room-title">私人房间</h1>
+              <p>房间码</p>
+              <strong className="room-code">{session.roomCode}</strong>
+              <label htmlFor="invite-url">邀请链接</label>
+              <input id="invite-url" readOnly value={inviteFor(locationHref, session.roomCode)} />
+              {session.waitingPosition !== undefined && (
+                <p aria-live="polite">当前等待位置：{session.waitingPosition}</p>
+              )}
+              {view !== undefined && (
+                <RoomControls
+                  client={client}
+                  view={view}
+                  playerId={session.playerId}
+                  connected={connectionState === 'connected'}
+                  onError={setError}
+                />
+              )}
+            </section>
           )}
-        </section>
+        </>
       )}
 
       <p className="disclosure">仅供娱乐的虚拟筹码，不支持充值、提现或价值兑换</p>
