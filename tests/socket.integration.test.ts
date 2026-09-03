@@ -1,6 +1,11 @@
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import request from 'supertest';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Socket } from 'socket.io-client';
 import type { BotInput } from '../src/server/ai';
+import { collectLanUrls, parsePort } from '../src/server/index';
 import type { TableView } from '../src/shared/protocol';
 import {
   closeClient,
@@ -16,12 +21,41 @@ import {
 describe('poker socket server', () => {
   const servers: TestServer[] = [];
   const clients: Socket[] = [];
+  const fixtureDirectories: string[] = [];
 
   afterEach(async () => {
     for (const client of clients) closeClient(client);
     for (const server of servers) await server.close();
     clients.length = 0;
     servers.length = 0;
+    for (const directory of fixtureDirectories) {
+      await rm(directory, { recursive: true, force: true });
+    }
+    fixtureDirectories.length = 0;
+  });
+
+  it('serves health, built assets, and the SPA fallback from the configured directory', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'lan-poker-dist-'));
+    fixtureDirectories.push(fixtureRoot);
+    const staticDir = join(fixtureRoot, '.build', 'dist');
+    await mkdir(staticDir, { recursive: true });
+    await writeFile(join(staticDir, 'index.html'), '<!doctype html><title>测试牌桌</title>');
+    await writeFile(join(staticDir, 'app.js'), 'globalThis.__LAN_POKER__ = true;');
+
+    const server = await startTestServer({ staticDir });
+    servers.push(server);
+
+    await request(server.url).get('/health').expect(200, { ok: true });
+    await request(server.url)
+      .get('/app.js')
+      .expect(200)
+      .expect('Content-Type', /javascript/)
+      .expect('globalThis.__LAN_POKER__ = true;');
+    await request(server.url)
+      .get('/rooms/ABCD23')
+      .expect(200)
+      .expect('Content-Type', /html/)
+      .expect(/测试牌桌/);
   });
 
   it('synchronizes two clients without leaking private cards', async () => {
@@ -749,5 +783,32 @@ describe('poker socket server', () => {
     scheduler.advanceBy(300_000);
 
     expect(server.rooms.getRoom(created.roomCode)).toBeUndefined();
+  });
+});
+
+describe('production server configuration', () => {
+  it('uses port 3000 by default and rejects partial, fractional, or out-of-range ports', () => {
+    expect(parsePort(undefined)).toBe(3000);
+    expect(parsePort('4173')).toBe(4173);
+    for (const invalid of ['', ' 3000', '3000abc', '3.5', '0', '65536']) {
+      expect(() => parsePort(invalid)).toThrow(/PORT/);
+    }
+  });
+
+  it('lists each unique non-internal IPv4 LAN URL', () => {
+    expect(collectLanUrls(3000, {
+      lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4', mac: '', internal: true, cidr: null }],
+      eth0: [
+        { address: '192.168.1.24', netmask: '255.255.255.0', family: 'IPv4', mac: '', internal: false, cidr: null },
+        { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::', family: 'IPv6', mac: '', internal: false, cidr: null, scopeid: 2 },
+      ],
+      wlan0: [
+        { address: '10.0.0.8', netmask: '255.255.255.0', family: 'IPv4', mac: '', internal: false, cidr: null },
+        { address: '192.168.1.24', netmask: '255.255.255.0', family: 'IPv4', mac: '', internal: false, cidr: null },
+      ],
+    })).toEqual([
+      'http://192.168.1.24:3000',
+      'http://10.0.0.8:3000',
+    ]);
   });
 });

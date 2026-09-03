@@ -9,6 +9,7 @@ import { registerPokerSocketHandlers } from './socket';
 import { systemScheduler, type Scheduler } from './timers';
 
 export interface PokerServerOptions {
+  staticDir?: string;
   scheduler?: Scheduler;
   randomCode?: () => string;
   randomToken?: () => string;
@@ -38,6 +39,22 @@ export function createPokerServer(options: PokerServerOptions = {}): PokerServer
   });
   const app = express();
   app.get('/health', (_request, response) => response.json({ ok: true }));
+  if (options.staticDir !== undefined) {
+    app.use(express.static(options.staticDir));
+    app.use((request, response, next) => {
+      if (
+        (request.method !== 'GET' && request.method !== 'HEAD') ||
+        request.path === '/health' || request.path.startsWith('/health/') ||
+        request.path.startsWith('/socket.io')
+      ) {
+        next();
+        return;
+      }
+      response.sendFile('index.html', { root: options.staticDir }, (error) => {
+        if (error !== undefined) next(error);
+      });
+    });
+  }
   const httpServer = createServer(app);
   const io = new SocketIoServer<ClientToServerEvents, ServerToClientEvents>(httpServer, {
     serveClient: false,
