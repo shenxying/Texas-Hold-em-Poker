@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import {
   createServer,
   get,
+  request as sendHttpRequest,
   type IncomingMessage,
   type Server as HttpServer,
   type ServerResponse,
@@ -83,6 +84,40 @@ function waitForSocketClose(socket: Duplex): Promise<void> {
   });
 }
 
+async function postJsonAfterContinue(
+  baseUrl: string,
+  path: string,
+  body: string,
+): Promise<{ continueCount: number; status: number | undefined; body: Record<string, unknown> }> {
+  return new Promise((resolve, reject) => {
+    let continueCount = 0;
+    const clientRequest = sendHttpRequest(new URL(path, baseUrl), {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(body),
+        expect: '100-continue',
+      },
+    });
+    clientRequest.on('socket', (socket) => rawSockets.push(socket));
+    clientRequest.once('error', reject);
+    clientRequest.once('continue', () => {
+      continueCount += 1;
+      clientRequest.end(body);
+    });
+    clientRequest.once('response', (response) => {
+      void readBody(response).then((rawBody) => {
+        resolve({
+          continueCount,
+          status: response.statusCode,
+          body: JSON.parse(rawBody) as Record<string, unknown>,
+        });
+      }, reject);
+    });
+    clientRequest.flushHeaders();
+  });
+}
+
 function echoUpstream(
   upstream: string,
   status: number,
@@ -98,6 +133,7 @@ function echoUpstream(
       method: requestMessage.method,
       url: requestMessage.url,
       requestHeader: requestMessage.headers['x-gateway-test'],
+      expectHeader: requestMessage.headers.expect,
       body: rawBody === '' ? null : JSON.parse(rawBody),
     }));
   });
@@ -247,6 +283,28 @@ describe('shared gateway HTTP routing', () => {
       });
   });
 
+  it('preserves an Expect request URL, header, body, and continue semantics', async () => {
+    const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
+    const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+
+    const response = await postJsonAfterContinue(
+      gateway.url,
+      '/api//v1?next=//keep',
+      JSON.stringify({ value: '保留' }),
+    );
+
+    expect(response.continueCount).toBe(1);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      upstream: 'drawing',
+      method: 'POST',
+      url: '/api//v1?next=//keep',
+      expectHeader: '100-continue',
+      body: { value: '保留' },
+    });
+  });
+
   it('preserves the poker prefix and keeps similarly named paths on drawing', async () => {
     const drawing = await listen(echoUpstream('drawing', 200, 'drawing-header'));
     const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
@@ -310,6 +368,49 @@ describe('shared gateway HTTP routing', () => {
     await gateway.gateway.close();
     await upstreamClosed;
 
+    expect(upstreamRequest.socket.destroyed).toBe(true);
+  });
+
+  it('closes a pending Expect upstream request after gateway close', async () => {
+    let captureRequest: (requestMessage: IncomingMessage) => void = () => undefined;
+    const receivedRequest = new Promise<IncomingMessage>((resolve) => {
+      captureRequest = resolve;
+    });
+    const stalledUpstream = createServer((requestMessage) => {
+      captureRequest(requestMessage);
+    });
+    const drawing = await listen(stalledUpstream);
+    const poker = await listen(echoUpstream('poker', 200, 'poker-header'));
+    const gateway = await startGatewayForTest(drawing.url, poker.url);
+    const body = JSON.stringify({ pending: true });
+    const clientRequest = sendHttpRequest(
+      new URL('/api//pending?next=//keep', gateway.url),
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(body),
+          expect: '100-continue',
+        },
+      },
+    );
+    clientRequest.on('error', () => undefined);
+    clientRequest.on('socket', (socket) => rawSockets.push(socket));
+    clientRequest.once('continue', () => clientRequest.end(body));
+    clientRequest.flushHeaders();
+    const upstreamRequest = await receivedRequest;
+    rawSockets.push(upstreamRequest.socket);
+    upstreamRequest.socket.on('error', () => undefined);
+    const upstreamClosed = waitForSocketClose(upstreamRequest.socket);
+    expect(upstreamRequest.socket.destroyed).toBe(false);
+
+    await gateway.gateway.close();
+    const closedWithinDeadline = await Promise.race([
+      upstreamClosed.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+    ]);
+
+    expect(closedWithinDeadline).toBe(true);
     expect(upstreamRequest.socket.destroyed).toBe(true);
   });
 

@@ -1,6 +1,7 @@
 import {
   createServer,
   type ClientRequest,
+  type IncomingMessage,
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http';
@@ -42,6 +43,7 @@ export function createGateway(options: GatewayOptions): GatewayServer {
   const upstreamSockets = new Set<Socket>();
   const proxyRequests = new Set<ClientRequest>();
   const proxySockets = new Set<Socket>();
+  const expectHeaders = new WeakMap<IncomingMessage, string>();
   const trackProxyRequest = (proxyRequest: ClientRequest): void => {
     proxyRequests.add(proxyRequest);
     let proxySocket: Socket | undefined;
@@ -73,13 +75,27 @@ export function createGateway(options: GatewayOptions): GatewayServer {
   );
   const httpServer = createServer((request, response) => {
     const target = targetFor(request.url ?? '/');
-    proxy.web(request, response, { target: target.href, prependPath: false }, () => {
-      sendUpstreamUnavailable(response);
-    });
+    const expectHeader = request.headers.expect;
+    if (expectHeader !== undefined) {
+      expectHeaders.set(request, expectHeader);
+      delete request.headers.expect;
+    }
+    try {
+      proxy.web(request, response, { target: target.href, prependPath: false }, () => {
+        sendUpstreamUnavailable(response);
+      });
+    } finally {
+      if (expectHeader !== undefined) request.headers.expect = expectHeader;
+    }
   });
   proxy.on('proxyReq', (proxyRequest, request) => {
     trackProxyRequest(proxyRequest);
     proxyRequest.path = request.url ?? '/';
+    const expectHeader = expectHeaders.get(request);
+    if (expectHeader !== undefined) {
+      expectHeaders.delete(request);
+      proxyRequest.setHeader('expect', expectHeader);
+    }
   });
   proxy.on('proxyReqWs', (proxyRequest, request) => {
     trackProxyRequest(proxyRequest);
