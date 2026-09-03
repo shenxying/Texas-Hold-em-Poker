@@ -5,7 +5,12 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { App } from '../src/client/App';
-import { SocketPokerClient, type PokerClientEvent } from '../src/client/socket';
+import {
+  createPokerClient,
+  SocketPokerClient,
+  socketPathFor,
+  type PokerClientEvent,
+} from '../src/client/socket';
 import type { CommandResponse, SessionInfo, TableView } from '../src/shared/protocol';
 
 type Listener = (...args: never[]) => void;
@@ -127,6 +132,18 @@ afterEach(() => cleanup());
 beforeEach(() => localStorage.clear());
 
 describe('SocketPokerClient transport lifecycle', () => {
+  it('derives the Socket.IO transport path from the explicit public base path', () => {
+    expect(socketPathFor('/poker/')).toBe('/poker/socket.io');
+    expect(socketPathFor('/')).toBe('/socket.io');
+  });
+
+  it('accepts a supplied transport through the client options object', () => {
+    const socket = new MockSocketTransport();
+
+    expect(createPokerClient({ socket: socket as never, basePath: '/poker' }))
+      .toBeInstanceOf(SocketPokerClient);
+  });
+
   it('does not double-bind when initial connect happens during explicit session restore', async () => {
     const { socket, client } = createHarness();
 

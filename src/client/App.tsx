@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { normalizeBasePath } from '../shared/basePath';
 import type { SessionInfo, TableView } from '../shared/protocol';
 import { Lobby } from './Lobby';
 import { PokerRoom } from './PokerRoom';
@@ -14,6 +15,7 @@ interface SavedSession {
 
 interface AppProps {
   client: PokerClient;
+  basePath?: string;
   locationHref?: string;
 }
 
@@ -51,8 +53,8 @@ function saveSession(session: SessionInfo): void {
   }));
 }
 
-function inviteFor(locationHref: string, roomCode: string): string {
-  const invite = new URL('/', locationHref);
+function inviteFor(locationHref: string, basePath: string, roomCode: string): string {
+  const invite = new URL(`${normalizeBasePath(basePath)}/`, locationHref);
   invite.searchParams.set('room', roomCode);
   return invite.toString();
 }
@@ -66,6 +68,7 @@ function connectionMessage(state: ConnectionState): string {
 
 export function App({
   client,
+  basePath = '',
   locationHref = globalThis.location?.href ?? 'http://localhost/',
 }: AppProps): React.JSX.Element {
   const initialRoomCode = useMemo(
@@ -161,7 +164,11 @@ export function App({
                 <span>房间码</span>
                 <strong className="room-code">{session.roomCode}</strong>
                 <label htmlFor="invite-url">邀请链接</label>
-                <input id="invite-url" readOnly value={inviteFor(locationHref, session.roomCode)} />
+                <input
+                  id="invite-url"
+                  readOnly
+                  value={inviteFor(locationHref, basePath, session.roomCode)}
+                />
               </div>
               {view !== undefined && (
                 <>

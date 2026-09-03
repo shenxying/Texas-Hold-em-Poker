@@ -58,6 +58,29 @@ describe('poker socket server', () => {
       .expect(/测试牌桌/);
   });
 
+  it('mounts health and the SPA under an explicit public base path', async () => {
+    const fixtureRoot = await mkdtemp(join(tmpdir(), 'lan-poker-dist-'));
+    fixtureDirectories.push(fixtureRoot);
+    const staticDir = join(fixtureRoot, '.build', 'dist');
+    await mkdir(staticDir, { recursive: true });
+    await writeFile(join(staticDir, 'index.html'), '<!doctype html><title>测试牌桌</title>');
+
+    const server = await startTestServer({ staticDir, basePath: '/poker' });
+    servers.push(server);
+
+    await request(server.url).get('/poker').expect(301).expect('Location', '/poker/');
+    await request(server.url).get('/poker/').expect(200, /测试牌桌/);
+    await request(server.url).get('/poker/health').expect(200, { ok: true });
+    await request(server.url).get('/health').expect(404);
+    await request(server.url).get('/poker/rooms/ABCD23').expect(200, /测试牌桌/);
+
+    const client = await connectClient(server.url, '/poker/socket.io');
+    clients.push(client);
+    await expect(emitAck(client, 'room:create', { nickname: '房主' })).resolves.toMatchObject({
+      roomCode: expect.any(String),
+    });
+  });
+
   it('synchronizes two clients without leaking private cards', async () => {
     const server = await startTestServer({
       randomCode: () => 'ABCD23',

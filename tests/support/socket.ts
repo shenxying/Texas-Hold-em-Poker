@@ -30,8 +30,11 @@ export async function startTestServer(options: PokerServerOptions = {}): Promise
   };
 }
 
-export async function connectClient(url: string): Promise<TestClient> {
-  const client = io(url, { transports: ['websocket'], forceNew: true });
+export async function connectClient(
+  url: string,
+  path = '/socket.io',
+): Promise<TestClient> {
+  const client = io(url, { path, transports: ['websocket'], forceNew: true });
   const queued: TableView[] = [];
   snapshots.set(client, queued);
   client.on('table:snapshot', (snapshot: TableView) => queued.push(snapshot));

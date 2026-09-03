@@ -129,6 +129,24 @@ describe('lobby and browser session', () => {
     });
   });
 
+  it('keeps an explicit public base path in a token-safe invitation', async () => {
+    const client = new FakePokerClient({ createRoom: hostSession });
+    render(
+      <App
+        client={client}
+        basePath="/poker"
+        locationHref="http://host:8080/poker/?room=abcd23"
+      />,
+    );
+
+    await userEvent.type(screen.getByLabelText('昵称'), '小明');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+
+    expect(await screen.findByDisplayValue('http://host:8080/poker/?room=ABCD23'))
+      .toBeInTheDocument();
+    expect(screen.queryByDisplayValue(/secret-token/)).not.toBeInTheDocument();
+  });
+
   it('prefills and uppercases a room code from an invitation URL', () => {
     render(<App client={new FakePokerClient()} locationHref="http://host/?room=abcd23" />);
 

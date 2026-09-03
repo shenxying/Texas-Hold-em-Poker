@@ -1,6 +1,7 @@
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { normalizeBasePath } from '../shared/basePath';
 import { createPokerServer, type PokerServer } from './app';
 
 type NetworkMap = NodeJS.Dict<NetworkInterfaceInfo[]>;
@@ -47,12 +48,14 @@ export async function startLanServer(options: LanServerOptions = {}): Promise<Ru
   const env = options.env ?? process.env;
   const host = env.HOST ?? '0.0.0.0';
   const configuredPort = parsePort(env.PORT);
+  const basePath = normalizeBasePath(env.BASE_PATH);
   const log = options.log ?? console.log;
   const staticDir = env.NODE_ENV === 'production'
     ? fileURLToPath(new URL('../../dist', import.meta.url))
     : undefined;
   const pokerServer = createPokerServer({
     ...(staticDir === undefined ? {} : { staticDir }),
+    basePath,
     onUnexpectedError: (context, error) => {
       console.error(`命令 ${context.command} 发生未预期错误`, error);
     },
@@ -85,9 +88,10 @@ export async function startLanServer(options: LanServerOptions = {}): Promise<Ru
   const port = address.port;
 
   log('局域网私人德州扑克已启动：');
-  log(`  本机：http://localhost:${port}`);
+  const publicPath = basePath === '' ? '' : `${basePath}/`;
+  log(`  本机：http://localhost:${port}${publicPath}`);
   const lanUrls = collectLanUrls(port, options.interfaces);
-  for (const url of lanUrls) log(`  局域网：${url}`);
+  for (const url of lanUrls) log(`  局域网：${url}${publicPath}`);
   if (lanUrls.length === 0) log('  未发现可用的非内部 IPv4 局域网地址。');
   log('若其他设备无法访问，请检查系统防火墙、企业网络策略或 Wi-Fi 客户端隔离。');
 

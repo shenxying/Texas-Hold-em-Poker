@@ -1,4 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
+import { normalizeBasePath, pathWithinBase } from '../shared/basePath';
 import type {
   ClientCommand,
   ClientCommandData,
@@ -195,6 +196,15 @@ export class SocketPokerClient implements PokerClient {
   }
 }
 
-export function createPokerClient(socket: PokerSocket = io()): PokerClient {
+export function socketPathFor(basePath: string): string {
+  return pathWithinBase(basePath, 'socket.io');
+}
+
+export function createPokerClient(options: {
+  socket?: PokerSocket;
+  basePath?: string;
+} = {}): PokerClient {
+  const basePath = normalizeBasePath(options.basePath ?? import.meta.env.BASE_URL);
+  const socket = options.socket ?? io({ path: socketPathFor(basePath) });
   return new SocketPokerClient(socket);
 }
