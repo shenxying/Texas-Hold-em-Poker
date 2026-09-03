@@ -14,7 +14,7 @@ body {
   background: radial-gradient(circle at top, #193d31, #08110e 70%);
 }
 
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 
 button {
   min-height: 2.75rem;
@@ -28,13 +28,13 @@ button {
 
 button:disabled { cursor: not-allowed; opacity: 0.55; }
 
-button:focus-visible, input:focus-visible, select:focus-visible {
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
   outline: 3px solid #f0cf82;
   outline-offset: 2px;
 }
 
 .app-shell {
-  width: min(42rem, calc(100% - 2rem));
+  width: min(86rem, calc(100% - 2rem));
   margin: 0 auto;
   padding: 3rem 0 1.5rem;
 }
@@ -61,6 +61,17 @@ input, select {
   background: #071410;
 }
 
+textarea {
+  width: 100%;
+  min-height: 5rem;
+  resize: vertical;
+  border: 1px solid #56776a;
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  color: inherit;
+  background: #071410;
+}
+
 .connection-banner, .error-banner, .field-help {
   padding: 0.75rem;
   border-radius: 0.5rem;
@@ -71,7 +82,173 @@ input, select {
 .room-code { font-size: 2rem; letter-spacing: 0.22em; }
 .disclosure { margin-top: 1.5rem; color: #ccd8d3; text-align: center; }
 
-@media (max-width: 560px) {
-  .app-shell { width: min(100% - 1rem, 42rem); padding-top: 0.5rem; }
+.invite-strip {
+  display: grid;
+  grid-template-columns: auto auto minmax(6rem, 1fr);
+  gap: 0.6rem 1rem;
+  align-items: center;
+}
+
+.invite-strip label { grid-column: 1; }
+.invite-strip input { grid-column: 2 / -1; }
+
+.poker-room {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  gap: 1rem;
+  align-items: start;
+}
+
+.live-notices { grid-column: 1 / -1; }
+.live-notices:empty { display: none; }
+.live-notices p { margin: 0 0 0.5rem; padding: 0.65rem; border-radius: 0.5rem; background: #684328; }
+
+.poker-table-wrap { min-width: 0; }
+.poker-table {
+  position: relative;
+  min-height: 40rem;
+  border: 0.8rem solid #533a24;
+  border-radius: 48%;
+  background: radial-gradient(ellipse, #196345, #0c3d2a 72%);
+  box-shadow: inset 0 0 0 0.25rem #9d7146, 0 1rem 2rem rgb(0 0 0 / 35%);
+}
+
+.table-center {
+  position: absolute;
+  inset: 34% 19%;
+  display: grid;
+  place-content: center;
+  gap: 0.55rem;
+  text-align: center;
+}
+
+.pot-total { margin: 0; font-size: 1.15rem; font-weight: 700; }
+.pot-breakdown { display: flex; justify-content: center; gap: 0.6rem; color: #d3ded9; font-size: 0.85rem; }
+.board, .hole-cards { display: flex; justify-content: center; gap: 0.3rem; }
+
+.playing-card, .card-placeholder {
+  display: inline-grid;
+  width: 3.35rem;
+  height: 4.7rem;
+  border-radius: 0.35rem;
+}
+
+.playing-card {
+  grid-template-rows: auto 1fr;
+  padding: 0.3rem;
+  color: #121212;
+  background: #fffdf7;
+  border: 1px solid #d8d1c1;
+  box-shadow: 0 0.2rem 0.4rem rgb(0 0 0 / 28%);
+  font-weight: 800;
+}
+
+.card-red { color: #c6352e; }
+.card-rank { justify-self: start; }
+.card-suit { place-self: center; font-size: 1.65rem; }
+.card-back {
+  border: 0.25rem solid #eee5d5;
+  background: repeating-linear-gradient(45deg, #254c76 0 0.3rem, #193651 0.3rem 0.6rem);
+}
+.card-placeholder { border: 1px dashed rgb(255 255 255 / 30%); }
+
+.table-seat {
+  position: absolute;
+  width: 10rem;
+  min-height: 7.2rem;
+  display: grid;
+  place-items: center;
+  gap: 0.12rem;
+  padding: 0.55rem;
+  border: 1px solid #527b6c;
+  border-radius: 0.7rem;
+  background: #10271f;
+  text-align: center;
+  font-size: 0.78rem;
+  transform: translate(-50%, -50%);
+}
+
+.current-actor { outline: 3px solid #f0cf82; }
+.folded { opacity: 0.62; }
+.seat-markers { display: flex; gap: 0.25rem; }
+.seat-markers span { padding: 0.12rem 0.3rem; border-radius: 999px; color: #1b1408; background: #f0cf82; }
+.table-seat .playing-card { width: 2rem; height: 2.8rem; padding: 0.16rem; }
+.table-seat .card-suit { font-size: 1rem; }
+.seat-0 { left: 50%; top: 3%; }
+.seat-1 { left: 79%; top: 14%; }
+.seat-2 { left: 95%; top: 38%; }
+.seat-3 { left: 88%; top: 76%; }
+.seat-4 { left: 65%; top: 95%; }
+.seat-5 { left: 35%; top: 95%; }
+.seat-6 { left: 12%; top: 76%; }
+.seat-7 { left: 5%; top: 38%; }
+.seat-8 { left: 21%; top: 14%; }
+.seat-summary { display: none; }
+
+.action-drawer { grid-column: 1; }
+.action-bar { margin: 0; border: 1px solid #527b6c; border-radius: 0.8rem; background: #10271f; }
+.action-bar legend { padding: 0 0.5rem; font-weight: 700; }
+.action-countdown { text-align: center; }
+.action-buttons, .wager-controls, .wager-shortcuts { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: end; }
+.wager-controls { flex: 1 1 25rem; }
+.wager-controls label { width: 100%; }
+.wager-controls input { width: 9rem; }
+.drawer-toggle { display: none; }
+
+.chat-drawer { grid-column: 2; grid-row: 2 / span 3; }
+.chat-panel { padding: 1rem; border: 1px solid #527b6c; border-radius: 0.8rem; background: #10271f; }
+.chat-panel h2 { margin-top: 0; }
+.chat-messages { height: 24rem; overflow-y: auto; padding: 0.5rem; border-radius: 0.5rem; background: #071410; }
+.chat-message { overflow-wrap: anywhere; }
+.chat-message.system { padding: 0.45rem; color: #f0cf82; background: #1a3028; }
+.chat-empty { color: #9db0a9; }
+.chat-form { margin-top: 0.8rem; }
+.start-game { grid-column: 1; justify-self: center; min-width: 12rem; }
+
+@media (max-width: 760px) {
+  .app-shell { width: min(100% - 0.75rem, 42rem); padding-top: 0.4rem; }
   .lobby, .room-summary, .room-controls { padding: 1rem; border-radius: 0.75rem; }
+  .invite-strip { grid-template-columns: 1fr; }
+  .invite-strip label, .invite-strip input { grid-column: 1; }
+  .poker-room { display: block; }
+  .seat-summary {
+    display: flex;
+    gap: 0.75rem;
+    overflow-x: auto;
+    padding: 0.5rem 0;
+    white-space: nowrap;
+  }
+  .poker-table { min-height: 29rem; border-width: 0.45rem; border-radius: 2rem; }
+  .table-seat { width: 6.6rem; min-height: 4.5rem; padding: 0.3rem; font-size: 0.66rem; }
+  .table-seat .hole-cards, .table-seat > span:not(.empty-seat), .seat-markers { display: none; }
+  .seat-0 { left: 50%; top: 6%; }
+  .seat-1 { left: 82%; top: 12%; }
+  .seat-2 { left: 90%; top: 34%; }
+  .seat-3 { left: 84%; top: 68%; }
+  .seat-4 { left: 64%; top: 91%; }
+  .seat-5 { left: 36%; top: 91%; }
+  .seat-6 { left: 16%; top: 68%; }
+  .seat-7 { left: 10%; top: 34%; }
+  .seat-8 { left: 18%; top: 12%; }
+  .table-center { inset: 32% 8%; }
+  .playing-card, .card-placeholder { width: 2.55rem; height: 3.65rem; }
+  .drawer-toggle { display: block; width: 100%; }
+  .action-drawer {
+    position: sticky;
+    z-index: 5;
+    bottom: 0;
+    margin-top: 0.75rem;
+    padding: 0.5rem;
+    border-radius: 0.8rem 0.8rem 0 0;
+    background: #08110e;
+  }
+  .action-drawer.closed .action-drawer-content { display: none; }
+  .action-buttons, .wager-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .wager-controls { margin-top: 0.5rem; }
+  .wager-controls label, .wager-shortcuts { grid-column: 1 / -1; }
+  .wager-controls input { width: 100%; }
+  .chat-toggle { margin-top: 0.75rem; }
+  .chat-drawer { display: none; }
+  .chat-drawer.open { display: block; position: fixed; z-index: 10; inset: 1rem; overflow-y: auto; padding: 0.5rem; background: #08110e; }
+  .chat-messages { height: min(50vh, 24rem); }
 }

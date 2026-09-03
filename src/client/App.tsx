@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { SessionInfo, TableView } from '../shared/protocol';
 import { Lobby } from './Lobby';
+import { PokerRoom } from './PokerRoom';
 import { RoomControls } from './RoomControls';
 import type { ConnectionState, PokerClient } from './socket';
 
@@ -147,21 +148,29 @@ export function App({
           ) : (
             <section className="room-summary" aria-labelledby="room-title">
               <h1 id="room-title">私人房间</h1>
-              <p>房间码</p>
-              <strong className="room-code">{session.roomCode}</strong>
-              <label htmlFor="invite-url">邀请链接</label>
-              <input id="invite-url" readOnly value={inviteFor(locationHref, session.roomCode)} />
-              {session.waitingPosition !== undefined && (
-                <p aria-live="polite">当前等待位置：{session.waitingPosition}</p>
-              )}
+              <div className="invite-strip">
+                <span>房间码</span>
+                <strong className="room-code">{session.roomCode}</strong>
+                <label htmlFor="invite-url">邀请链接</label>
+                <input id="invite-url" readOnly value={inviteFor(locationHref, session.roomCode)} />
+              </div>
               {view !== undefined && (
-                <RoomControls
-                  client={client}
-                  view={view}
-                  playerId={session.playerId}
-                  connected={connectionState === 'connected'}
-                  onError={setError}
-                />
+                <>
+                  <PokerRoom
+                    client={client}
+                    view={view}
+                    playerId={session.playerId}
+                    connected={connectionState === 'connected'}
+                    onError={setError}
+                  />
+                  <RoomControls
+                    client={client}
+                    view={view}
+                    playerId={session.playerId}
+                    connected={connectionState === 'connected'}
+                    onError={setError}
+                  />
+                </>
               )}
             </section>
           )}
