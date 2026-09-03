@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Socket } from 'socket.io-client';
 import type { BotInput } from '../src/server/ai';
+import type { TableView } from '../src/shared/protocol';
 import {
   closeClient,
   connectClient,
@@ -54,6 +55,66 @@ describe('poker socket server', () => {
     expect(JSON.stringify(hostView)).not.toContain('deck');
     expect(JSON.stringify(guestView)).not.toContain('sessionToken');
     expect(hostView.messages.map((message) => message.text)).toContain('新一手牌开始了');
+  });
+
+  it('rejects a second identity on one socket without leaking its private projection', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(host, 'room:create', {
+      nickname: '房主',
+    });
+    const joined = await emitAck<{ sessionToken: string; playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+
+    const secondRoom = await emitRawAck<{
+      ok: false;
+      error: { code: string };
+    }>(host, 'room:create', { nickname: '另一个房主' });
+    const secondIdentity = await emitRawAck<{
+      ok: false;
+      error: { code: string };
+    }>(host, 'room:join', { roomCode: created.roomCode, nickname: '分身' });
+    const reconnectIdentity = await emitRawAck<{
+      ok: false;
+      error: { code: string };
+    }>(host, 'room:reconnect', { sessionToken: joined.sessionToken });
+    expect(secondRoom).toMatchObject({
+      ok: false,
+      error: { code: 'SOCKET_ALREADY_BOUND' },
+    });
+    expect(secondIdentity).toMatchObject({
+      ok: false,
+      error: { code: 'SOCKET_ALREADY_BOUND' },
+    });
+    expect(reconnectIdentity).toMatchObject({
+      ok: false,
+      error: { code: 'SOCKET_ALREADY_BOUND' },
+    });
+    expect(server.rooms.getRoom(created.roomCode)?.seats.filter(Boolean)).toHaveLength(2);
+
+    const received: TableView[] = [];
+    host.on('table:snapshot', (view) => received.push(view));
+    await emitAck(host, 'game:start', {});
+    await emitAck(host, 'game:act', { type: 'call' });
+    await nextSnapshot(host, (view) => view.actorId === joined.playerId);
+
+    expect(received.length).toBeGreaterThan(0);
+    for (const view of received) {
+      expect(view.players.find((player) => player.id === created.playerId)?.holeCards).toHaveLength(2);
+      expect(view.players.find((player) => player.id === joined.playerId)?.holeCards).toBeUndefined();
+    }
   });
 
   it('folds on a 30 second timeout and records timeout and settlement messages', async () => {
@@ -125,6 +186,55 @@ describe('poker socket server', () => {
     const view = await nextSnapshot(host, (snapshot) => snapshot.board.length === 3);
     expect(view.phase).toBe('playing');
     expect(view.messages.map((message) => message.text)).toContain('朋友 超时，自动过牌');
+  });
+
+  it('preserves the active timeout after a rejected action and invalidates it after success', async () => {
+    const scheduler = new ManualScheduler();
+    const server = await startTestServer({
+      scheduler,
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string }>(host, 'room:create', { nickname: '房主' });
+    await emitAck(guest, 'room:join', { roomCode: created.roomCode, nickname: '朋友' });
+    await emitAck(host, 'game:start', {});
+
+    const room = server.rooms.getRoom(created.roomCode)!;
+    const deadline = room.actionDeadline;
+    const originalTimeout = scheduler.callbacks()[0]!;
+    const rejected = await emitRawAck<{
+      ok: false;
+      error: { code: string };
+    }>(guest, 'game:act', { type: 'fold' });
+
+    expect(rejected).toMatchObject({ ok: false, error: { code: 'NOT_PLAYER_TURN' } });
+    expect(room.actionDeadline).toBe(deadline);
+    expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.callbacks()[0]).toBe(originalTimeout);
+
+    const illegal = await emitRawAck<{
+      ok: false;
+      error: { code: string };
+    }>(host, 'game:act', { type: 'check' });
+    expect(illegal).toMatchObject({ ok: false, error: { code: 'ILLEGAL_ACTION' } });
+    expect(room.actionDeadline).toBe(deadline);
+    expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.callbacks()[0]).toBe(originalTimeout);
+
+    await emitAck(host, 'game:act', { type: 'call' });
+    const version = room.version;
+    const actorId = room.hand?.actorId;
+    originalTimeout();
+    expect(room.version).toBe(version);
+    expect(room.hand?.actorId).toBe(actorId);
   });
 
   it('ignores a canceled action callback after a later hand starts', async () => {
@@ -415,6 +525,37 @@ describe('poker socket server', () => {
     );
     expect(view.messages.find((message) => message.text === text)?.text).toBe(text);
   }, 1_000);
+
+  it('does not extend the active human deadline when chat updates the room', async () => {
+    const scheduler = new ManualScheduler();
+    const server = await startTestServer({
+      scheduler,
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string }>(host, 'room:create', { nickname: '房主' });
+    await emitAck(guest, 'room:join', { roomCode: created.roomCode, nickname: '朋友' });
+    await emitAck(host, 'game:start', {});
+    const room = server.rooms.getRoom(created.roomCode)!;
+
+    expect(room.actionDeadline).toBe(30_000);
+    scheduler.advanceBy(29_000);
+    await emitAck(host, 'chat:send', { text: '不延长行动时间' });
+    expect(room.actionDeadline).toBe(30_000);
+    expect(scheduler.pendingCount()).toBe(1);
+
+    scheduler.advanceBy(1_000);
+    expect(room.phase).toBe('between-hands');
+    expect(room.messages.map((message) => message.text)).toContain('房主 超时，自动弃牌');
+  });
 
   it('ignores a stale bot callback after another room transition', async () => {
     const scheduler = new ManualScheduler();

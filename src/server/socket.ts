@@ -138,6 +138,11 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
   const actionTimers = new ActionTimerRegistry(options.scheduler);
   const disconnectTimers = new DisconnectTimerRegistry(options.scheduler);
   const actionHistories = new Map<string, PlayerAction[]>();
+  const scheduledTurns = new Map<string, {
+    room: Room;
+    hand: NonNullable<Room['hand']>;
+    actorId: string;
+  }>();
   let disposed = false;
 
   function broadcast(room: Room): void {
@@ -222,15 +227,37 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
   }
 
   function scheduleNextAction(room: Room): void {
-    actionTimers.clear(room.code);
-    delete room.actionDeadline;
     const hand = room.hand;
     const actorId = hand?.actorId;
-    if (room.phase !== 'playing' || hand === undefined || actorId === null) return;
+    const existingTurn = scheduledTurns.get(room.code);
+    const actor = actorId === undefined || actorId === null
+      ? undefined
+      : roomPlayers(room).find((player) => player.id === actorId);
+    if (
+      !actor?.isBot &&
+      room.phase === 'playing' &&
+      hand !== undefined &&
+      actorId !== undefined &&
+      actorId !== null &&
+      existingTurn?.room === room &&
+      existingTurn.hand === hand &&
+      existingTurn.actorId === actorId
+    ) return;
 
-    const expectedVersion = room.version;
-    const actor = roomPlayers(room).find((player) => player.id === actorId);
+    actionTimers.clear(room.code);
+    scheduledTurns.delete(room.code);
+    delete room.actionDeadline;
+    if (
+      room.phase !== 'playing' ||
+      hand === undefined ||
+      actorId === undefined ||
+      actorId === null
+    ) return;
+
+    const scheduledTurn = { room, hand, actorId };
+    scheduledTurns.set(room.code, scheduledTurn);
     if (actor?.isBot) {
+      const expectedVersion = room.version;
       actionTimers.replace(room.code, () => {
         const currentRoom = rooms.getRoom(room.code);
         if (
@@ -238,6 +265,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
           currentRoom.phase !== 'playing' ||
           currentRoom.hand !== hand ||
           currentRoom.version !== expectedVersion ||
+          scheduledTurns.get(room.code) !== scheduledTurn ||
           currentRoom.hand.actorId !== actorId
         ) {
           return;
@@ -259,7 +287,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         currentRoom !== room ||
         currentRoom.phase !== 'playing' ||
         currentRoom.hand !== hand ||
-        currentRoom.version !== expectedVersion ||
+        scheduledTurns.get(room.code) !== scheduledTurn ||
         currentRoom.hand.actorId !== actorId
       ) {
         return;
@@ -281,9 +309,10 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
   }
 
   function applyRoomAction(room: Room, action: PlayerAction): void {
-    actionTimers.clear(room.code);
-    delete room.actionDeadline;
     const transition = applyAction(room.hand!, action);
+    actionTimers.clear(room.code);
+    scheduledTurns.delete(room.code);
+    delete room.actionDeadline;
     const history = actionHistories.get(room.code) ?? [];
     history.push({ ...action });
     actionHistories.set(room.code, history);
@@ -292,6 +321,16 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
     room.version += 1;
     scheduleNextAction(room);
     broadcast(room);
+  }
+
+  function assertUnbound(socket: PokerSocket): void {
+    if (
+      socket.data.roomCode !== undefined ||
+      socket.data.sessionToken !== undefined ||
+      socket.data.playerId !== undefined
+    ) {
+      throw new SocketRuleError('SOCKET_ALREADY_BOUND', 'Socket is already bound to a session');
+    }
   }
 
   function bind(socket: PokerSocket, session: SessionInfo): void {
@@ -346,6 +385,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         const changedRoom = rooms.getRoom(roomCode);
         if (changedRoom === undefined) {
           actionTimers.clear(roomCode);
+          scheduledTurns.delete(roomCode);
           actionHistories.delete(roomCode);
           continue;
         }
@@ -385,6 +425,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
   io.on('connection', (socket) => {
     socket.on('room:create', (untrustedInput, ack) => {
       respond(socket, 'room:create', ack, () => {
+        assertUnbound(socket);
         const input = recordInput(untrustedInput);
         const settings = input.settings === undefined ? undefined : settingsPatch(input.settings);
         const result = rooms.createRoom({
@@ -403,6 +444,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
 
     socket.on('room:join', (untrustedInput, ack) => {
       respond(socket, 'room:join', ack, () => {
+        assertUnbound(socket);
         const input = recordInput(untrustedInput);
         const result = rooms.joinRoom({
           roomCode: stringField(input, 'roomCode'),
@@ -421,6 +463,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
 
     socket.on('room:reconnect', (untrustedInput, ack) => {
       respond(socket, 'room:reconnect', ack, () => {
+        assertUnbound(socket);
         const input = recordInput(untrustedInput);
         const token = stringField(input, 'sessionToken');
         const result = rooms.reconnect(token, socket.id);
@@ -572,6 +615,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
   return () => {
     disposed = true;
     actionTimers.dispose();
+    scheduledTurns.clear();
     disconnectTimers.dispose();
   };
 }
