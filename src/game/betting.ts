@@ -49,7 +49,9 @@ export function getLegalActions(state: HandState, playerId: string): LegalAction
   const callAmount = Math.min(amountToMatch, player.stack);
   const maxRaiseTo = player.streetBet + player.stack;
   const facingBet = amountToMatch > 0;
-  const raiseReopened = !player.actedSinceFullRaise;
+  const raiseReopened =
+    player.lastFacedBet === null ||
+    state.currentBet - player.lastFacedBet >= state.lastFullRaiseSize;
   const minimum = state.currentBet < state.bigBlind
     ? state.bigBlind
     : state.currentBet + state.lastFullRaiseSize;
@@ -116,12 +118,14 @@ export function applyBettingAction(state: HandState, action: PlayerAction): void
     case 'fold':
       player.folded = true;
       player.actedSinceFullRaise = true;
+      player.lastFacedBet = state.currentBet;
       break;
     case 'check':
       if (!legal.canCheck) {
         throw new GameRuleError('ILLEGAL_ACTION', 'Cannot check while facing a bet');
       }
       player.actedSinceFullRaise = true;
+      player.lastFacedBet = state.currentBet;
       break;
     case 'call':
       if (!legal.canCall) {
@@ -129,6 +133,7 @@ export function applyBettingAction(state: HandState, action: PlayerAction): void
       }
       commit(player, legal.callAmount);
       player.actedSinceFullRaise = true;
+      player.lastFacedBet = state.currentBet;
       break;
     case 'bet': {
       const amount = requireAmount(action);
@@ -141,6 +146,7 @@ export function applyBettingAction(state: HandState, action: PlayerAction): void
       commit(player, amount - player.streetBet);
       state.currentBet = amount;
       markFullRaise(state, player.id, amount);
+      player.lastFacedBet = amount;
       break;
     }
     case 'raise': {
@@ -160,6 +166,7 @@ export function applyBettingAction(state: HandState, action: PlayerAction): void
         player.id,
         previousBet < state.bigBlind ? Math.max(state.bigBlind, raiseSize) : raiseSize,
       );
+      player.lastFacedBet = amount;
       break;
     }
     case 'all-in': {
@@ -180,6 +187,7 @@ export function applyBettingAction(state: HandState, action: PlayerAction): void
           markFullRaise(state, player.id, fullRaiseSize);
         }
       }
+      player.lastFacedBet = Math.max(previousBet, target);
       break;
     }
   }

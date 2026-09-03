@@ -56,6 +56,7 @@ export interface HandPlayer {
   folded: boolean;
   allIn: boolean;
   actedSinceFullRaise: boolean;
+  lastFacedBet: number | null;
   lastAction: PlayerActionType | null;
 }
 

@@ -19,6 +19,7 @@ function player(id: string, totalCommitted: number, holeCards: string): HandPlay
     folded: false,
     allIn: true,
     actedSinceFullRaise: true,
+    lastFacedBet: 0,
     lastAction: 'all-in',
   };
 }

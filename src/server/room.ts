@@ -62,6 +62,7 @@ export interface Room {
   seats: Array<RoomPlayer | null>;
   waiting: RoomPlayer[];
   hostPlayerId?: string;
+  dealerSeatIndex?: number;
   hand?: HandState;
   revealedPlayerIds: Set<string>;
   actionDeadline?: number;
@@ -125,7 +126,8 @@ function normalizedRoomCode(roomCode: string): string {
 function normalizeNickname(nickname: string): { display: string; key: string } {
   const display = nickname.trim();
   const visibleLength = Array.from(display).length;
-  if (visibleLength < 1 || visibleLength > 20) {
+  const containsVisibleCharacter = /[^\s\p{Cc}\p{Cf}]/u.test(display);
+  if (visibleLength < 1 || visibleLength > 20 || !containsVisibleCharacter) {
     throw new RoomRuleError('INVALID_NICKNAME', 'Nickname must contain 1 to 20 visible characters');
   }
   return { display, key: display.toLowerCase() };

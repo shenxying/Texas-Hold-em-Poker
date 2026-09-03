@@ -91,6 +91,15 @@ export function App({
       setError(event.error.message);
       return;
     }
+    if (event.type === 'session:invalid') {
+      savedSession.current = undefined;
+      storage()?.removeItem(SESSION_KEY);
+      setSession(undefined);
+      setView(undefined);
+      setError(event.error.message);
+      setRestoring(false);
+      return;
+    }
     if (event.type === 'connection:state') {
       setConnectionState(event.state);
       return;

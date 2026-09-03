@@ -47,6 +47,8 @@ describe('room service and views', () => {
     const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
 
     expectCode(() => rooms.createRoom({ nickname: '   ' }), 'INVALID_NICKNAME');
+    expectCode(() => rooms.createRoom({ nickname: '\u200B\u200D' }), 'INVALID_NICKNAME');
+    expectCode(() => rooms.createRoom({ nickname: '\u0000\u0001' }), 'INVALID_NICKNAME');
     expectCode(() => rooms.createRoom({ nickname: 'a'.repeat(21) }), 'INVALID_NICKNAME');
     expectCode(
       () => rooms.createRoom({ nickname: '房主', settings: { startingStack: 999 } }),
@@ -60,6 +62,8 @@ describe('room service and views', () => {
       () => rooms.createRoom({ nickname: '房主', settings: { startingStack: 1_000, bigBlind: 1_001 } }),
       'INVALID_SETTINGS',
     );
+
+    expect(rooms.createRoom({ nickname: '小明\u200B' }).playerId).toBe('player-1');
   });
 
   it('retries normalized room-code collisions', () => {

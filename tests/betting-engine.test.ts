@@ -5,6 +5,7 @@ import {
   createHand,
   getLegalActions,
 } from '../src/game/engine';
+import type { HandPlayer, HandState } from '../src/game/types';
 
 const seats = [
   { id: 'p1', stack: 10_000 },
@@ -20,6 +21,52 @@ function expectErrorCode(run: () => unknown, code: string): void {
     thrown = error;
   }
   expect(thrown).toMatchObject({ code });
+}
+
+function actedPlayer(
+  id: string,
+  stack: number,
+  lastFacedBet: number | null = 100,
+): HandPlayer {
+  return {
+    id,
+    stack,
+    holeCards: [],
+    streetBet: 100,
+    totalCommitted: 100,
+    folded: false,
+    allIn: false,
+    actedSinceFullRaise: lastFacedBet !== null,
+    lastFacedBet,
+    lastAction: 'call',
+  };
+}
+
+function cumulativeRaiseState(firstStack: number, secondStack: number): HandState {
+  return {
+    players: [
+      actedPlayer('p1', 900),
+      actedPlayer('p2', firstStack, null),
+      actedPlayer('p3', secondStack, null),
+      actedPlayer('p4', 900),
+    ],
+    street: 'flop',
+    currentBet: 100,
+    lastFullRaiseSize: 100,
+    actorId: 'p2',
+    dealerIndex: 0,
+    board: [],
+    deck: [],
+    smallBlind: 50,
+    bigBlind: 100,
+  };
+}
+
+function totalChips(state: HandState): number {
+  return state.players.reduce(
+    (total, player) => total + player.stack + player.totalCommitted,
+    0,
+  );
 }
 
 describe('betting engine', () => {
@@ -69,6 +116,60 @@ describe('betting engine', () => {
     state = applyAction(state, { playerId: 'p2', type: 'all-in' }).state;
     state = applyAction(state, { playerId: 'p3', type: 'call' }).state;
     expect(getLegalActions(state, 'p1')).toMatchObject({
+      canRaise: false,
+      canAllIn: false,
+    });
+  });
+
+  it('reopens raising when consecutive short all-ins cumulatively equal a full raise', () => {
+    let state = cumulativeRaiseState(50, 100);
+    const chips = totalChips(state);
+
+    state = applyAction(state, { playerId: 'p2', type: 'all-in' }).state;
+    state = applyAction(state, { playerId: 'p3', type: 'all-in' }).state;
+
+    expect(state.actorId).toBe('p4');
+    expect(getLegalActions(state, 'p4')).toMatchObject({
+      canRaise: true,
+      canAllIn: true,
+      minRaiseTo: 300,
+    });
+
+    state = applyAction(state, { playerId: 'p4', type: 'call' }).state;
+
+    expect(state.actorId).toBe('p1');
+    expect(getLegalActions(state, 'p1')).toMatchObject({
+      canRaise: true,
+      canAllIn: true,
+      minRaiseTo: 300,
+      maxRaiseTo: 1_000,
+    });
+    expect(totalChips(state)).toBe(chips);
+  });
+
+  it('keeps raising closed when consecutive short all-ins remain below a full raise', () => {
+    let state = cumulativeRaiseState(40, 90);
+    state = applyAction(state, { playerId: 'p2', type: 'all-in' }).state;
+    state = applyAction(state, { playerId: 'p3', type: 'all-in' }).state;
+    state = applyAction(state, { playerId: 'p4', type: 'call' }).state;
+
+    expect(state.currentBet).toBe(190);
+    expect(getLegalActions(state, 'p1')).toMatchObject({
+      canRaise: false,
+      canAllIn: false,
+    });
+  });
+
+  it('measures reopening from the wager a player most recently faced', () => {
+    const state = cumulativeRaiseState(50, 100);
+    state.currentBet = 200;
+    state.actorId = 'p4';
+    state.players[3] = actedPlayer('p4', 860, 140);
+    state.players[3]!.streetBet = 140;
+    state.players[3]!.totalCommitted = 140;
+
+    expect(getLegalActions(state, 'p4')).toMatchObject({
+      callAmount: 60,
       canRaise: false,
       canAllIn: false,
     });

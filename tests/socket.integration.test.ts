@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import request from 'supertest';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Socket } from 'socket.io-client';
 import type { BotInput } from '../src/server/ai';
 import { collectLanUrls, parsePort } from '../src/server/index';
@@ -188,6 +188,107 @@ describe('poker socket server', () => {
         expect.stringContaining('本手牌结算'),
       ]),
     );
+  });
+
+  it('moves the dealer clockwise between consecutive hands', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const joined = await emitAck<{ playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+
+    await emitAck(host, 'game:start', {});
+    const room = server.rooms.getRoom(created.roomCode)!;
+    expect(room.hand?.players[room.hand.dealerIndex]?.id).toBe(created.playerId);
+    await emitAck(host, 'game:act', { type: 'fold' });
+
+    await emitAck(host, 'game:start', {});
+    expect(room.hand?.players[room.hand.dealerIndex]?.id).toBe(joined.playerId);
+  });
+
+  it('uses a cryptographic shuffle source by default instead of engine Math.random', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string }>(host, 'room:create', {
+      nickname: '房主',
+    });
+    await emitAck(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+    const random = vi.spyOn(Math, 'random').mockImplementation(() => {
+      throw new Error('engine Math.random must not provide production shuffle entropy');
+    });
+
+    try {
+      await emitAck(host, 'game:start', {});
+      expect(server.rooms.getRoom(created.roomCode)?.phase).toBe('playing');
+    } finally {
+      random.mockRestore();
+    }
+  });
+
+  it('skips a zero-stack seat when advancing the dealer', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const busted = await connectClient(server.url);
+    const live = await connectClient(server.url);
+    clients.push(host, busted, live);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const bustedSession = await emitAck<{ playerId: string }>(busted, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '零筹码玩家',
+    });
+    const liveSession = await emitAck<{ playerId: string }>(live, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '继续玩家',
+    });
+
+    await emitAck(host, 'game:start', {});
+    await emitAck(host, 'game:act', { type: 'fold' });
+    await emitAck(busted, 'game:act', { type: 'fold' });
+    const room = server.rooms.getRoom(created.roomCode)!;
+    room.seats.find((player) => player?.id === bustedSession.playerId)!.stack = 0;
+
+    await emitAck(host, 'game:start', {});
+    expect(room.hand?.players[room.hand.dealerIndex]?.id).toBe(liveSession.playerId);
   });
 
   it('auto-checks when checking is legal', async () => {
@@ -591,34 +692,50 @@ describe('poker socket server', () => {
     expect(room.messages.map((message) => message.text)).toContain('房主 超时，自动弃牌');
   });
 
-  it('ignores a stale bot callback after another room transition', async () => {
+  it('preserves the original bot timer through chat and reconnect but rejects it after action', async () => {
     const scheduler = new ManualScheduler();
+    const seenInputs: BotInput[] = [];
     const server = await startTestServer({
       scheduler,
       randomCode: () => 'ABCD23',
       randomToken: () => 'token-1',
       randomInt: () => 0,
       random: () => 0,
+      chooseBotAction: (input: BotInput) => {
+        seenInputs.push(input);
+        return { playerId: input.playerId, type: 'check' };
+      },
     });
     servers.push(server);
     const host = await connectClient(server.url);
     clients.push(host);
-    await emitAck(host, 'room:create', { nickname: '房主' });
+    const created = await emitAck<{ sessionToken: string }>(host, 'room:create', {
+      nickname: '房主',
+    });
     await emitAck(host, 'room:add-bot', { style: 'balanced' });
     await emitAck(host, 'game:start', {});
     await emitAck(host, 'game:act', { type: 'call' });
-    const staleBotCallback = scheduler.callbacks()[0]!;
+    const originalBotCallback = scheduler.callbacks()[0]!;
 
-    await emitAck(host, 'chat:send', { text: '保持计时器版本前进' });
+    await emitAck(host, 'chat:send', { text: '聊天不应重排 AI 行动' });
+    const replacement = await connectClient(server.url);
+    clients.push(replacement);
+    await emitAck(replacement, 'room:reconnect', { sessionToken: created.sessionToken });
+    await emitAck(replacement, 'chat:send', { text: '重连也不应重排 AI 行动' });
     const room = server.rooms.getRoom('ABCD23')!;
-    const version = room.version;
-    const actorId = room.hand?.actorId;
-    staleBotCallback();
 
-    expect(room.version).toBe(version);
-    expect(room.hand?.actorId).toBe(actorId);
-    await emitAck(host, 'chat:send', { text: '再次替换计时器' });
     expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.callbacks()[0]).toBe(originalBotCallback);
+    scheduler.advanceBy(599);
+    expect(seenInputs).toHaveLength(0);
+    scheduler.advanceBy(1);
+    expect(seenInputs).toHaveLength(1);
+
+    const versionAfterAction = room.version;
+    const actorAfterAction = room.hand?.actorId;
+    originalBotCallback();
+    expect(room.version).toBe(versionAfterAction);
+    expect(room.hand?.actorId).toBe(actorAfterAction);
   });
 
   it('promotes a waiting human by replacing a bot after settlement', async () => {
@@ -676,6 +793,51 @@ describe('poker socket server', () => {
     expect(view.waitingPosition).toBeUndefined();
     expect(view.players.find((player) => player.id === waiting.playerId)?.isBot).toBe(false);
     expect(view.players.some((player) => player.isBot)).toBe(false);
+  });
+
+  it('keeps a winning bot nickname in settlement chat when that bot is replaced', async () => {
+    const scheduler = new ManualScheduler();
+    const server = await startTestServer({
+      scheduler,
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+      random: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const waiter = await connectClient(server.url);
+    clients.push(host, waiter);
+    const created = await emitAck<{
+      roomCode: string;
+      sessionToken: string;
+      playerId: string;
+    }>(host, 'room:create', { nickname: '房主' });
+    for (let index = 0; index < 8; index += 1) {
+      await emitAck(host, 'room:add-bot', { style: 'balanced' });
+    }
+    await emitAck(waiter, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '候场玩家',
+    });
+    await emitAck(host, 'game:start', {});
+
+    const room = server.rooms.getRoom(created.roomCode)!;
+    const winningBot = room.seats[8]!;
+    for (const player of room.hand!.players) {
+      player.folded = player.id !== created.playerId && player.id !== winningBot.id;
+    }
+    room.hand!.actorId = created.playerId;
+    await emitAck(host, 'game:act', { type: 'fold' });
+
+    const view = await nextSnapshot(waiter, (snapshot) => snapshot.phase === 'between-hands');
+    const settlement = view.messages.at(-1)?.text ?? '';
+    expect(settlement).toContain(`${winningBot.nickname} +`);
+    expect(settlement).not.toContain(winningBot.id);
+    expect(view.players.some((player) => player.id === winningBot.id)).toBe(false);
   });
 
   it('completes a deterministic mixed human and bot hand', async () => {

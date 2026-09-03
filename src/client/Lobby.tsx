@@ -14,7 +14,8 @@ interface LobbyProps {
 function normalizedNickname(value: string): string | undefined {
   const nickname = value.trim();
   const length = Array.from(nickname).length;
-  return length >= 1 && length <= 20 ? nickname : undefined;
+  const containsVisibleCharacter = /[^\s\p{Cc}\p{Cf}]/u.test(nickname);
+  return length >= 1 && length <= 20 && containsVisibleCharacter ? nickname : undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -67,7 +68,11 @@ export function Lobby({
   return (
     <section className="lobby" aria-labelledby="lobby-title">
       <h1 id="lobby-title">局域网德州扑克</h1>
-      <form>
+      <form onSubmit={(event) => void submit(
+        roomCode.trim().length > 0 ? 'join' : 'create',
+        event,
+      )}>
+        <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
         <label htmlFor="nickname">昵称</label>
         <input
           id="nickname"
@@ -79,7 +84,7 @@ export function Lobby({
         {nicknameHelp !== '' && <p id="nickname-help" className="field-help">{nicknameHelp}</p>}
 
         <button
-          type="submit"
+          type="button"
           disabled={formDisabled}
           onClick={(event) => void submit('create', event)}
         >
@@ -95,7 +100,7 @@ export function Lobby({
           disabled={formDisabled}
         />
         <button
-          type="submit"
+          type="button"
           disabled={formDisabled}
           onClick={(event) => void submit('join', event)}
         >

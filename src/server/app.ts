@@ -1,3 +1,4 @@
+import { randomInt as cryptoRandomInt } from 'node:crypto';
 import { createServer, type Server as HttpServer } from 'node:http';
 import express from 'express';
 import { Server as SocketIoServer } from 'socket.io';
@@ -67,7 +68,7 @@ export function createPokerServer(options: PokerServerOptions = {}): PokerServer
     ...(options.chooseBotAction === undefined
       ? {}
       : { chooseBotAction: options.chooseBotAction }),
-    ...(options.randomInt === undefined ? {} : { randomInt: options.randomInt }),
+    randomInt: options.randomInt ?? ((max: number) => cryptoRandomInt(max)),
     ...(options.onUnexpectedError === undefined
       ? {}
       : { onUnexpectedError: options.onUnexpectedError }),

@@ -166,7 +166,7 @@ describe('SocketPokerClient transport lifecycle', () => {
     expect(events.at(-1)).toEqual({ type: 'connection:state', state: 'connected' });
   });
 
-  it('keeps the client disabled and exposes the server error when recovery is rejected', async () => {
+  it('clears a rejected recovery binding and returns the connected transport to the lobby', async () => {
     const { socket, client, events } = createHarness();
     socket.connect();
     await bindCreatedSession(socket, client);
@@ -180,7 +180,32 @@ describe('SocketPokerClient transport lifecycle', () => {
     await Promise.resolve();
 
     expect(events).toContainEqual({ type: 'command:error', error });
-    expect(events.at(-1)).toEqual({ type: 'connection:state', state: 'disconnected' });
+    expect(events.at(-1)).toEqual({ type: 'connection:state', state: 'connected' });
+
+    socket.disconnect();
+    socket.connect();
+    expect(socket.emissions).toHaveLength(2);
+    expect(events.at(-1)).toEqual({ type: 'connection:state', state: 'connected' });
+  });
+
+  it('retains the bound session when an ordinary room command is rejected', async () => {
+    const { socket, client } = createHarness();
+    socket.connect();
+    await bindCreatedSession(socket, client);
+
+    const command = client.send('room:add-bot', { style: 'balanced' });
+    socket.respond(1, {
+      ok: false,
+      error: { code: 'NOT_HOST', message: '只有房主可以添加 AI' },
+    });
+    await expect(command).rejects.toMatchObject({ code: 'NOT_HOST' });
+
+    socket.disconnect();
+    socket.connect();
+    expect(socket.emissions[2]).toMatchObject({
+      event: 'room:reconnect',
+      input: { sessionToken: 'session-secret' },
+    });
   });
 
   it('keeps React host controls disabled until transport recovery has a fresh snapshot and ack', async () => {
@@ -204,5 +229,31 @@ describe('SocketPokerClient transport lifecycle', () => {
 
     socket.respond(1, { ok: true, data: session });
     await waitFor(() => expect(screen.getByRole('button', { name: '保存设置' })).toBeEnabled());
+  });
+
+  it('returns React to an enabled lobby when transport recovery finds an expired session', async () => {
+    const socket = new MockSocketTransport();
+    socket.connected = true;
+    const client = new SocketPokerClient(socket as never);
+    render(<App client={client} locationHref="http://host/" />);
+
+    await userEvent.type(screen.getByLabelText('昵称'), '房主');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+    socket.respond(0, { ok: true, data: session });
+    expect(await screen.findByText('ABCD23')).toBeInTheDocument();
+    socket.serverEvent('table:snapshot', hostSnapshot);
+    expect(localStorage.getItem('lan-poker-session')).not.toBeNull();
+
+    socket.disconnect();
+    socket.connect();
+    socket.respond(1, {
+      ok: false,
+      error: { code: 'INVALID_SESSION', message: '服务器重启，会话已失效' },
+    });
+
+    expect(await screen.findByText('服务器重启，会话已失效')).toBeInTheDocument();
+    expect(screen.getByLabelText('昵称')).toBeEnabled();
+    expect(screen.queryByText('私人房间')).not.toBeInTheDocument();
+    expect(localStorage.getItem('lan-poker-session')).toBeNull();
   });
 });

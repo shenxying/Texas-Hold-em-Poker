@@ -126,6 +126,7 @@ export function createHand(config: HandConfig): HandState {
     folded: false,
     allIn: false,
     actedSinceFullRaise: false,
+    lastFacedBet: null,
     lastAction: null,
   }));
   dealHoleCards(players, deck, config.dealerIndex);
@@ -195,6 +196,7 @@ function advanceStreet(state: HandState, events: GameEvent[]): void {
   for (const player of state.players) {
     player.streetBet = 0;
     player.actedSinceFullRaise = false;
+    player.lastFacedBet = null;
     player.lastAction = null;
   }
   events.push({ type: 'street-advanced', street, cards: cloneCards(cards) });

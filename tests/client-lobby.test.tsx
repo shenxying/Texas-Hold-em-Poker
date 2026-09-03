@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/client/App';
@@ -147,11 +147,38 @@ describe('lobby and browser session', () => {
     expect(client.joinRoom).toHaveBeenCalledWith('ABCD23', '朋友');
   });
 
+  it('creates on Enter when the room code is empty', async () => {
+    const client = new FakePokerClient();
+    render(<App client={client} locationHref="http://host/" />);
+
+    await userEvent.type(screen.getByLabelText('昵称'), '房主{Enter}');
+
+    await screen.findByText('ABCD23');
+    expect(client.createRoom).toHaveBeenCalledWith('房主');
+    expect(client.joinRoom).not.toHaveBeenCalled();
+  });
+
+  it('joins on Enter when an invitation prefilled the room code', async () => {
+    const client = new FakePokerClient();
+    render(<App client={client} locationHref="http://host/?room=abcd23" />);
+
+    await userEvent.type(screen.getByLabelText('昵称'), '朋友{Enter}');
+
+    await screen.findByText('ABCD23');
+    expect(client.joinRoom).toHaveBeenCalledWith('ABCD23', '朋友');
+    expect(client.createRoom).not.toHaveBeenCalled();
+  });
+
   it('keeps invalid nicknames local and allows twenty visible Unicode characters', async () => {
     const client = new FakePokerClient();
     render(<App client={client} locationHref="http://host/" />);
 
     await userEvent.type(screen.getByLabelText('昵称'), '   ');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+    expect(screen.getByText('昵称必须包含 1–20 个可见字符')).toBeInTheDocument();
+    expect(client.createRoom).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText('昵称'), { target: { value: '\u200B\u200D\u0001' } });
     await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
     expect(screen.getByText('昵称必须包含 1–20 个可见字符')).toBeInTheDocument();
     expect(client.createRoom).not.toHaveBeenCalled();

@@ -18,6 +18,7 @@ export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'dis
 export type PokerClientEvent =
   | { type: 'table:snapshot'; view: Parameters<ServerToClientEvents['table:snapshot']>[0] }
   | { type: 'command:error'; error: CommandError }
+  | { type: 'session:invalid'; error: CommandError }
   | { type: 'session:replaced'; roomCode: string }
   | { type: 'connection:state'; state: ConnectionState };
 
@@ -167,9 +168,18 @@ export class SocketPokerClient implements PokerClient {
       recovery.session = session;
       recovery.acknowledgementReceived = true;
       this.completeRecovery(recovery);
-    }).catch(() => {
+    }).catch((error: unknown) => {
       if (this.recovery !== recovery) return;
       this.recovery = undefined;
+      if (error instanceof PokerCommandError && error.code === 'INVALID_SESSION') {
+        this.boundSession = undefined;
+        this.publish({
+          type: 'session:invalid',
+          error: { code: error.code, message: error.message },
+        });
+        this.setConnectionState(this.socket.connected ? 'connected' : 'disconnected');
+        return;
+      }
       this.setConnectionState('disconnected');
     });
   }

@@ -119,6 +119,20 @@ function roomPlayers(room: Room): RoomPlayer[] {
   ];
 }
 
+function nextDealerIndex(room: Room, seated: readonly RoomPlayer[]): number {
+  const eligibleSeatIndexes = new Set(seated.map((player) => player.seatIndex!));
+  const start = room.dealerSeatIndex === undefined
+    ? 0
+    : (room.dealerSeatIndex + 1) % room.seats.length;
+  for (let offset = 0; offset < room.seats.length; offset += 1) {
+    const seatIndex = (start + offset) % room.seats.length;
+    if (!eligibleSeatIndexes.has(seatIndex)) continue;
+    room.dealerSeatIndex = seatIndex;
+    return seated.findIndex((player) => player.seatIndex === seatIndex);
+  }
+  throw new SocketRuleError('NOT_ENOUGH_PLAYERS', 'No eligible dealer seat exists');
+}
+
 function commandError(error: unknown): CommandError {
   if (
     error instanceof Error &&
@@ -187,11 +201,12 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
       }
     }
     if (room.hand?.street !== 'complete') return;
+    const payouts = settlementPayouts(room, events);
     room.phase = 'between-hands';
     rooms.completeHand(room.code);
     rooms.recordSystemEvent(
       room.code,
-      { type: 'hand-settled', payouts: settlementPayouts(room, events) },
+      { type: 'hand-settled', payouts },
       options.scheduler.now(),
     );
   }
@@ -234,7 +249,6 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
       ? undefined
       : roomPlayers(room).find((player) => player.id === actorId);
     if (
-      !actor?.isBot &&
       room.phase === 'playing' &&
       hand !== undefined &&
       actorId !== undefined &&
@@ -257,14 +271,12 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
     const scheduledTurn = { room, hand, actorId };
     scheduledTurns.set(room.code, scheduledTurn);
     if (actor?.isBot) {
-      const expectedVersion = room.version;
       actionTimers.replace(room.code, () => {
         const currentRoom = rooms.getRoom(room.code);
         if (
           currentRoom !== room ||
           currentRoom.phase !== 'playing' ||
           currentRoom.hand !== hand ||
-          currentRoom.version !== expectedVersion ||
           scheduledTurns.get(room.code) !== scheduledTurn ||
           currentRoom.hand.actorId !== actorId
         ) {
@@ -567,7 +579,7 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         }
         room.hand = createHand({
           seats: seated.map((candidate) => ({ id: candidate.id, stack: candidate.stack })),
-          dealerIndex: 0,
+          dealerIndex: nextDealerIndex(room, seated),
           smallBlind: room.settings.smallBlind,
           bigBlind: room.settings.bigBlind,
           ...(options.randomInt === undefined ? {} : { randomInt: options.randomInt }),
