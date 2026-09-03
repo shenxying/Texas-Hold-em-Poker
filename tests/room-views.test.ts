@@ -63,7 +63,21 @@ describe('room service and views', () => {
       'INVALID_SETTINGS',
     );
 
-    expect(rooms.createRoom({ nickname: '小明\u200B' }).playerId).toBe('player-1');
+    const visible = rooms.createRoom({ nickname: '小明\u200B' });
+    expect(visible.playerId).toBe('player-1');
+    expect(rooms.joinRoom({
+      roomCode: visible.roomCode,
+      nickname: '👩‍💻',
+    }).playerId).toBe('player-2');
+  });
+
+  it.each([
+    ['VS16', '\uFE0F'],
+    ['CGJ', '\u034F'],
+  ])('rejects a %s-only nickname', (_label, nickname) => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+
+    expectCode(() => rooms.createRoom({ nickname }), 'INVALID_NICKNAME');
   });
 
   it('retries normalized room-code collisions', () => {

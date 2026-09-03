@@ -14,7 +14,8 @@ interface LobbyProps {
 function normalizedNickname(value: string): string | undefined {
   const nickname = value.trim();
   const length = Array.from(nickname).length;
-  const containsVisibleCharacter = /[^\s\p{Cc}\p{Cf}]/u.test(nickname);
+  const containsVisibleCharacter =
+    /[^\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(nickname);
   return length >= 1 && length <= 20 && containsVisibleCharacter ? nickname : undefined;
 }
 

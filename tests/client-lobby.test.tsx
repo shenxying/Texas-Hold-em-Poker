@@ -190,6 +190,31 @@ describe('lobby and browser session', () => {
     expect(client.createRoom).toHaveBeenCalledWith('😀'.repeat(20));
   });
 
+  it('allows an emoji nickname containing a zero-width joiner', async () => {
+    const client = new FakePokerClient();
+    render(<App client={client} locationHref="http://host/" />);
+
+    fireEvent.change(screen.getByLabelText('昵称'), { target: { value: '👩‍💻' } });
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+
+    await screen.findByText('ABCD23');
+    expect(client.createRoom).toHaveBeenCalledWith('👩‍💻');
+  });
+
+  it.each([
+    ['VS16', '\uFE0F'],
+    ['CGJ', '\u034F'],
+  ])('keeps a %s-only nickname local', async (_label, nickname) => {
+    const client = new FakePokerClient();
+    render(<App client={client} locationHref="http://host/" />);
+
+    fireEvent.change(screen.getByLabelText('昵称'), { target: { value: nickname } });
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+
+    expect(screen.getByText('昵称必须包含 1–20 个可见字符')).toBeInTheDocument();
+    expect(client.createRoom).not.toHaveBeenCalled();
+  });
+
   it('disables lobby submissions while awaiting acknowledgement and announces server errors', async () => {
     const pending = deferred<SessionInfo>();
     const client = new FakePokerClient({ createRoom: pending.promise });

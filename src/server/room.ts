@@ -126,7 +126,8 @@ function normalizedRoomCode(roomCode: string): string {
 function normalizeNickname(nickname: string): { display: string; key: string } {
   const display = nickname.trim();
   const visibleLength = Array.from(display).length;
-  const containsVisibleCharacter = /[^\s\p{Cc}\p{Cf}]/u.test(display);
+  const containsVisibleCharacter =
+    /[^\s\p{Cc}\p{Cf}\p{Default_Ignorable_Code_Point}]/u.test(display);
   if (visibleLength < 1 || visibleLength > 20 || !containsVisibleCharacter) {
     throw new RoomRuleError('INVALID_NICKNAME', 'Nickname must contain 1 to 20 visible characters');
   }
