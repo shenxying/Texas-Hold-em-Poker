@@ -125,3 +125,13 @@ export interface ServerToClientEvents {
   'command:error': (error: CommandError) => void;
   'session:replaced': (input: { roomCode: string }) => void;
 }
+
+export type ClientCommand = keyof ClientToServerEvents;
+
+export type ClientCommandInput<Command extends ClientCommand> =
+  Parameters<ClientToServerEvents[Command]>[0];
+
+export type ClientCommandData<Command extends ClientCommand> =
+  Parameters<ClientToServerEvents[Command]>[1] extends CommandAck<infer Data>
+    ? Data
+    : never;
