@@ -1,0 +1,310 @@
+import { spawn } from 'node:child_process';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+export type ServiceName = 'drawing' | 'poker' | 'gateway';
+
+export interface ChildSpec {
+  name: ServiceName;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  readyUrl: string;
+}
+
+export interface OwnedChild {
+  pid: number;
+  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  signal(signal: NodeJS.Signals): void;
+}
+
+export interface SupervisorClock {
+  now(): number;
+  sleep(milliseconds: number): Promise<void>;
+}
+
+export interface SupervisorSignalSource {
+  on(event: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+  off(event: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+}
+
+export interface SupervisorOptions {
+  specs?: readonly ChildSpec[];
+  spawnChild?: (spec: ChildSpec) => OwnedChild;
+  waitUntilReady?: (url: string, timeoutMs: number) => Promise<void>;
+  clock?: SupervisorClock;
+  signalSource?: SupervisorSignalSource;
+  log?: (message: string) => void;
+  pidFile?: string;
+  readyTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
+  stopAfterReady?: boolean;
+}
+
+interface TrackedChild {
+  spec: ChildSpec;
+  child: OwnedChild;
+  result?: { code: number | null; signal: NodeJS.Signals | null };
+}
+
+const defaultClock: SupervisorClock = {
+  now: () => Date.now(),
+  sleep: (milliseconds) => new Promise((resolveDelay) => {
+    setTimeout(resolveDelay, milliseconds).unref();
+  }),
+};
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+async function writeOwnedPidFile(pidFile: string): Promise<void> {
+  await mkdir(dirname(pidFile), { recursive: true });
+  try {
+    const existingText = await readFile(pidFile, 'utf8');
+    const existingPid = Number(existingText.trim());
+    if (!Number.isSafeInteger(existingPid) || existingPid <= 0) {
+      throw new Error(`PID 文件格式无效：${pidFile}`);
+    }
+    if (existingPid !== process.pid && processExists(existingPid)) {
+      throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  await writeFile(pidFile, `${process.pid}\n`, { mode: 0o600 });
+}
+
+async function removeOwnedPidFile(pidFile: string): Promise<void> {
+  try {
+    const contents = await readFile(pidFile, 'utf8');
+    if (contents.trim() === String(process.pid)) await rm(pidFile);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
+function defaultSpawnChild(spec: ChildSpec): OwnedChild {
+  const child = spawn(spec.command, spec.args, {
+    cwd: spec.cwd,
+    env: spec.env,
+    shell: false,
+    stdio: 'inherit',
+  });
+  if (child.pid === undefined) throw new Error(`无法启动 ${spec.name}`);
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolveExit) => {
+      child.once('error', () => resolveExit({ code: 1, signal: null }));
+      child.once('exit', (code, signal) => resolveExit({ code, signal }));
+    },
+  );
+  return {
+    pid: child.pid,
+    exited,
+    signal(signal) {
+      child.kill(signal);
+    },
+  };
+}
+
+async function waitForHttpReady(
+  url: string,
+  timeoutMs: number,
+  clock: SupervisorClock,
+): Promise<void> {
+  const deadline = clock.now() + timeoutMs;
+  let lastError: unknown;
+  while (clock.now() < deadline) {
+    const remaining = Math.max(1, deadline - clock.now());
+    try {
+      const response = await fetch(url, {
+        signal: AbortSignal.timeout(Math.min(2_000, remaining)),
+      });
+      if (response.ok) return;
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await clock.sleep(Math.min(250, Math.max(1, deadline - clock.now())));
+  }
+  const detail = lastError instanceof Error ? `：${lastError.message}` : '';
+  throw new Error(`等待 ${url} 就绪超时${detail}`);
+}
+
+export function createDefaultChildSpecs(
+  repositoryRoot: string,
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+): readonly ChildSpec[] {
+  const tsx = resolve(repositoryRoot, 'node_modules/.bin/tsx');
+  return [
+    {
+      name: 'drawing',
+      command: './scripts/start_local_961.sh',
+      args: [],
+      cwd: '/home/sxy/.worktrees/drawing-api-annotator-proxy/drawing_api_961',
+      env: {
+        ...inheritedEnv,
+        DRAWING_API_HOST: '127.0.0.1',
+        DRAWING_API_PORT: '18080',
+        DRAWING_API_DATA_DIR: '/root/workspace/12.autoresearch/drawing_api_961/var',
+        DRAWING_API_QDRANT_LOCAL_PATH: '/root/workspace/12.autoresearch/drawing_api_961/var/qdrant',
+      },
+      readyUrl: 'http://127.0.0.1:18080/ready',
+    },
+    {
+      name: 'poker',
+      command: tsx,
+      args: ['src/server/index.ts'],
+      cwd: repositoryRoot,
+      env: {
+        ...inheritedEnv,
+        NODE_ENV: 'production',
+        HOST: '127.0.0.1',
+        PORT: '3000',
+        BASE_PATH: '/poker',
+      },
+      readyUrl: 'http://127.0.0.1:3000/poker/health',
+    },
+    {
+      name: 'gateway',
+      command: tsx,
+      args: ['src/gateway/index.ts'],
+      cwd: repositoryRoot,
+      env: {
+        ...inheritedEnv,
+        NODE_ENV: 'production',
+        GATEWAY_HOST: '0.0.0.0',
+        GATEWAY_PORT: '8080',
+        DRAWING_UPSTREAM: 'http://127.0.0.1:18080',
+        POKER_UPSTREAM: 'http://127.0.0.1:3000',
+        POKER_BASE_PATH: '/poker',
+      },
+      readyUrl: 'http://127.0.0.1:8080/poker/health',
+    },
+  ];
+}
+
+function unexpectedExitError(
+  tracked: TrackedChild,
+  result: { code: number | null; signal: NodeJS.Signals | null },
+): Error {
+  const outcome = result.signal === null
+    ? `退出码 ${String(result.code)}`
+    : `信号 ${result.signal}`;
+  return new Error(`${tracked.spec.name} 子进程意外退出（${outcome}）`);
+}
+
+async function waitForExit(
+  tracked: TrackedChild,
+  timeoutMs: number,
+  clock: SupervisorClock,
+): Promise<boolean> {
+  if (tracked.result !== undefined) return true;
+  return Promise.race([
+    tracked.child.exited.then(() => true),
+    clock.sleep(timeoutMs).then(() => false),
+  ]);
+}
+
+async function stopChildren(
+  children: TrackedChild[],
+  timeoutMs: number,
+  clock: SupervisorClock,
+  log: (message: string) => void,
+): Promise<void> {
+  for (const tracked of [...children].reverse()) {
+    if (tracked.result !== undefined) continue;
+    log(`正在停止 ${tracked.spec.name}（PID ${tracked.child.pid}）`);
+    tracked.child.signal('SIGTERM');
+    if (await waitForExit(tracked, timeoutMs, clock)) continue;
+    if (tracked.result === undefined) {
+      log(`${tracked.spec.name} 未在期限内退出，发送 SIGKILL`);
+      tracked.child.signal('SIGKILL');
+      await waitForExit(tracked, timeoutMs, clock);
+    }
+  }
+}
+
+export async function runSupervisor(options: SupervisorOptions = {}): Promise<void> {
+  const repositoryRoot = fileURLToPath(new URL('../..', import.meta.url));
+  const specs = options.specs ?? createDefaultChildSpecs(repositoryRoot);
+  const spawnChild = options.spawnChild ?? defaultSpawnChild;
+  const clock = options.clock ?? defaultClock;
+  const waitUntilReady = options.waitUntilReady ?? (
+    (url: string, timeoutMs: number) => waitForHttpReady(url, timeoutMs, clock)
+  );
+  const signalSource = options.signalSource ?? process;
+  const log = options.log ?? console.log;
+  const pidFile = options.pidFile ?? resolve(repositoryRoot, 'var/shared-8080/supervisor.pid');
+  const readyTimeoutMs = options.readyTimeoutMs ?? 60_000;
+  const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
+  const children: TrackedChild[] = [];
+  let stopping = false;
+  let resolveSignal!: () => void;
+  const signalReceived = new Promise<void>((resolveStop) => {
+    resolveSignal = resolveStop;
+  });
+  const requestStop = (): void => {
+    if (stopping) return;
+    stopping = true;
+    resolveSignal();
+  };
+  signalSource.on('SIGINT', requestStop);
+  signalSource.on('SIGTERM', requestStop);
+
+  let ownsPidFile = false;
+  try {
+    await writeOwnedPidFile(pidFile);
+    ownsPidFile = true;
+    for (const spec of specs) {
+      if (stopping) break;
+      log(`正在启动 ${spec.name}……`);
+      const child = spawnChild(spec);
+      const tracked: TrackedChild = { spec, child };
+      children.push(tracked);
+      const exitWatch = child.exited.then((result) => {
+        tracked.result = result;
+        throw unexpectedExitError(tracked, result);
+      });
+      await Promise.race([
+        waitUntilReady(spec.readyUrl, readyTimeoutMs),
+        exitWatch,
+        signalReceived,
+      ]);
+      if (stopping) break;
+      log(`${spec.name} 已就绪`);
+    }
+
+    if (!stopping && children.length === specs.length && !options.stopAfterReady) {
+      await Promise.race([
+        signalReceived,
+        ...children.map((tracked) => tracked.child.exited.then((result) => {
+          tracked.result = result;
+          throw unexpectedExitError(tracked, result);
+        })),
+      ]);
+    }
+  } finally {
+    signalSource.off('SIGINT', requestStop);
+    signalSource.off('SIGTERM', requestStop);
+    await stopChildren(children, shutdownTimeoutMs, clock, log);
+    if (ownsPidFile) await removeOwnedPidFile(pidFile);
+  }
+}
+
+const isMain = process.argv[1] !== undefined &&
+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url;
+
+if (isMain) {
+  void runSupervisor().catch((error: unknown) => {
+    console.error('共享服务监督器失败', error);
+    process.exitCode = 1;
+  });
+}

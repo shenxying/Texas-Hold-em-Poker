@@ -1,6 +1,7 @@
 .worktrees/
 node_modules/
 dist/
+var/
 coverage/
 *.log
 .env

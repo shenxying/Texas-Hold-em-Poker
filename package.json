@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "concurrently -k -n client,server \"vite --host 0.0.0.0 --port 5173\" \"PORT=3000 tsx watch src/server/index.ts\"",
     "build": "vite build && tsc -p tsconfig.json --noEmit",
+    "shared": "bash scripts/shared-8080.sh",
+    "shared:run": "tsx src/gateway/supervisor.ts",
     "start": "NODE_ENV=production tsx src/server/index.ts",
     "test": "vitest run",
     "test:watch": "vitest"
