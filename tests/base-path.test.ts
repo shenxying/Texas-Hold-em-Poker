@@ -13,6 +13,18 @@ describe('public base path', () => {
     expect(() => normalizeBasePath('/poker?room=x')).toThrow(/BASE_PATH/);
   });
 
+  it.each([
+    '//evil.example',
+    '/\\evil.example',
+    '/%2e%2e',
+    '/:tenant',
+    '/poker[',
+    '/poker(',
+    '/poker+',
+  ])('rejects unsafe static-path value %s', (value) => {
+    expect(() => normalizeBasePath(value)).toThrow(/BASE_PATH/);
+  });
+
   it('places a suffix inside root and nested base paths', () => {
     expect(pathWithinBase('', 'health')).toBe('/health');
     expect(pathWithinBase('/poker/', '/socket.io')).toBe('/poker/socket.io');

@@ -72,6 +72,7 @@ describe('poker socket server', () => {
     await request(server.url).get('/poker/').expect(200, /测试牌桌/);
     await request(server.url).get('/poker/health').expect(200, { ok: true });
     await request(server.url).get('/health').expect(404);
+    await request(server.url).get('/anything/health').expect(404);
     await request(server.url).get('/poker/rooms/ABCD23').expect(200, /测试牌桌/);
 
     const client = await connectClient(server.url, '/poker/socket.io');
@@ -79,6 +80,16 @@ describe('poker socket server', () => {
     await expect(emitAck(client, 'room:create', { nickname: '房主' })).resolves.toMatchObject({
       roomCode: expect.any(String),
     });
+  });
+
+  it('rejects a parameterized base before arbitrary prefixes can expose health', async () => {
+    const attemptedServer = startTestServer({ basePath: '/:tenant' });
+    try {
+      await expect(attemptedServer).rejects.toThrow(/BASE_PATH/);
+    } finally {
+      const server = await attemptedServer.catch(() => undefined);
+      if (server !== undefined) await server.close();
+    }
   });
 
   it('synchronizes two clients without leaking private cards', async () => {
