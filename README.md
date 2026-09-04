@@ -86,6 +86,12 @@ npm start
 是环境特定的；容器内的健康检查仍使用 `http://127.0.0.1:8080`。Drawing 的 `/live`、
 `/ready` 和 `/api/v1/...` 等路径保持不变。
 
+首次切换不得使用下面的日常命令，也不得手工停止 Drawing。首次迁移必须按
+[共享 8080 网关运维手册](docs/shared-8080-runbook.md) 运行 fail-closed cutover 脚本；脚本会在任何
+identity、idle、health、total 或 listener 门禁失败时停止，并在停机后的失败上自动回滚。
+
+下面的命令块只用于**已经完成首次 cutover**、当前由 shared supervisor 管理的环境：
+
 ```bash
 cd /home/sxy/lan-texas-holdem/.worktrees/lan-poker
 VITE_BASE_PATH=/poker/ npm run build
@@ -96,5 +102,4 @@ npm run shared -- stop
 
 共享运行时把 Drawing 绑定到 loopback `18080`、Poker 绑定到 loopback `3000`，仅 gateway
 监听 `0.0.0.0:8080`。不得同时运行两个访问同一本地 Qdrant 的 Drawing 进程，也不得修改既有
-Drawing 数据、模型或密钥。首次切换、完整验收与 exact-PID 回滚步骤见
-[共享 8080 网关运维手册](docs/shared-8080-runbook.md)。
+Drawing 数据、模型或密钥。完整验收与 exact-PID 回滚也由上述运维手册中的安全脚本负责。
