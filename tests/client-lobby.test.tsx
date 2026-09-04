@@ -75,6 +75,7 @@ class FakePokerClient implements PokerClient {
   readonly createRoom = vi.fn<(nickname: string) => Promise<SessionInfo>>();
   readonly joinRoom = vi.fn<(roomCode: string, nickname: string) => Promise<SessionInfo>>();
   readonly reconnect = vi.fn<(sessionToken: string) => Promise<SessionInfo>>();
+  readonly leaveRoom = vi.fn<(localOnly?: boolean) => Promise<void>>();
   readonly sent: Array<{ command: PokerCommand; input: unknown }> = [];
   private listeners = new Set<(event: PokerClientEvent) => void>();
 
@@ -86,6 +87,7 @@ class FakePokerClient implements PokerClient {
     this.createRoom.mockImplementation(() => Promise.resolve(options.createRoom ?? hostSession));
     this.joinRoom.mockImplementation(() => Promise.resolve(options.joinRoom ?? hostSession));
     this.reconnect.mockImplementation(() => Promise.resolve(options.reconnect ?? hostSession));
+    this.leaveRoom.mockImplementation(() => Promise.resolve());
   }
 
   send<Command extends PokerCommand>(

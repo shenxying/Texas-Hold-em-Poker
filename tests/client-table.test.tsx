@@ -83,6 +83,7 @@ class FakePokerClient implements PokerClient {
   createRoom(): Promise<SessionInfo> { throw new Error('unused'); }
   joinRoom(): Promise<SessionInfo> { throw new Error('unused'); }
   reconnect(): Promise<SessionInfo> { throw new Error('unused'); }
+  leaveRoom(): Promise<void> { return Promise.resolve(); }
   subscribe(_listener: (event: PokerClientEvent) => void): () => void { return () => {}; }
 
   send<Command extends PokerCommand>(

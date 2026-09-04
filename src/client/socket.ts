@@ -27,6 +27,7 @@ export interface PokerClient {
   createRoom(nickname: string, settings?: Partial<RoomSettings>): Promise<SessionInfo>;
   joinRoom(roomCode: string, nickname: string): Promise<SessionInfo>;
   reconnect(sessionToken: string): Promise<SessionInfo>;
+  leaveRoom(localOnly?: boolean): Promise<void>;
   send<Command extends PokerCommand>(
     command: Command,
     input: ClientCommandInput<Command>,
@@ -104,6 +105,13 @@ export class SocketPokerClient implements PokerClient {
 
   reconnect(sessionToken: string): Promise<SessionInfo> {
     return this.rememberSession(this.send('room:reconnect', { sessionToken }));
+  }
+
+  async leaveRoom(localOnly = false): Promise<void> {
+    if (!localOnly) await this.send('room:leave', {});
+    this.boundSession = undefined;
+    this.recovery = undefined;
+    this.replaced = false;
   }
 
   send<Command extends PokerCommand>(

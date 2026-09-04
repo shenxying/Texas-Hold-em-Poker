@@ -225,6 +225,54 @@ describe('SocketPokerClient transport lifecycle', () => {
     });
   });
 
+  it('clears recovery after a successful connected leave', async () => {
+    const { socket, client } = createHarness();
+    socket.connect();
+    await bindCreatedSession(socket, client);
+
+    const leaving = client.leaveRoom();
+    expect(socket.emissions[1]).toMatchObject({ event: 'room:leave', input: {} });
+    socket.respond(1, { ok: true, data: {} });
+    await leaving;
+
+    socket.disconnect();
+    socket.connect();
+    expect(socket.emissions).toHaveLength(2);
+  });
+
+  it('leaves locally without sending a command or reconnecting later', async () => {
+    const { socket, client } = createHarness();
+    socket.connect();
+    await bindCreatedSession(socket, client);
+
+    await client.leaveRoom(true);
+
+    expect(socket.emissions).toHaveLength(1);
+    socket.disconnect();
+    socket.connect();
+    expect(socket.emissions).toHaveLength(1);
+  });
+
+  it('retains recovery binding when a connected leave is rejected', async () => {
+    const { socket, client } = createHarness();
+    socket.connect();
+    await bindCreatedSession(socket, client);
+
+    const leaving = client.leaveRoom();
+    socket.respond(1, {
+      ok: false,
+      error: { code: 'INVALID_SESSION', message: '会话已失效' },
+    });
+    await expect(leaving).rejects.toMatchObject({ code: 'INVALID_SESSION' });
+
+    socket.disconnect();
+    socket.connect();
+    expect(socket.emissions[2]).toMatchObject({
+      event: 'room:reconnect',
+      input: { sessionToken: 'session-secret' },
+    });
+  });
+
   it('keeps React host controls disabled until transport recovery has a fresh snapshot and ack', async () => {
     const socket = new MockSocketTransport();
     socket.connected = true;

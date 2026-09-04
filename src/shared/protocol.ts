@@ -90,6 +90,10 @@ export interface ClientToServerEvents {
     input: { sessionToken: string },
     ack: CommandAck<SessionInfo>,
   ) => void;
+  'room:leave': (
+    input: Record<string, never>,
+    ack: CommandAck<Record<string, never>>,
+  ) => void;
   'room:update-settings': (
     input: { settings: Partial<RoomSettings> },
     ack: CommandAck<Record<string, never>>,

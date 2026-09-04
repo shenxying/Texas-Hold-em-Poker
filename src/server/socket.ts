@@ -1,6 +1,6 @@
 import type { Server, Socket } from 'socket.io';
-import { applyAction, createHand, getLegalActions } from '../game/engine';
-import type { GameEvent, PlayerAction } from '../game/types';
+import { applyAction, createHand, forceFold, getLegalActions } from '../game/engine';
+import type { GameEvent, HandTransition, PlayerAction } from '../game/types';
 import { botDelayMs, chooseBotAction, type BotInput } from './ai';
 import type {
   BotStyle,
@@ -322,17 +322,27 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
 
   function applyRoomAction(room: Room, action: PlayerAction): void {
     const transition = applyAction(room.hand!, action);
-    actionTimers.clear(room.code);
-    scheduledTurns.delete(room.code);
-    delete room.actionDeadline;
-    const history = actionHistories.get(room.code) ?? [];
-    history.push({ ...action });
-    actionHistories.set(room.code, history);
-    room.hand = transition.state;
-    finishHandIfNeeded(room, transition.events);
+    commitHandTransition(room, transition, action);
     room.version += 1;
     scheduleNextAction(room);
     broadcast(room);
+  }
+
+  function commitHandTransition(
+    room: Room,
+    transition: HandTransition,
+    historyAction?: PlayerAction,
+  ): void {
+    actionTimers.clear(room.code);
+    scheduledTurns.delete(room.code);
+    delete room.actionDeadline;
+    if (historyAction !== undefined) {
+      const history = actionHistories.get(room.code) ?? [];
+      history.push({ ...historyAction });
+      actionHistories.set(room.code, history);
+    }
+    room.hand = transition.state;
+    finishHandIfNeeded(room, transition.events);
   }
 
   function assertUnbound(socket: PokerSocket): void {
@@ -493,6 +503,40 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         scheduleNextAction(room);
         broadcast(room);
         return session;
+      });
+    });
+    socket.on('room:leave', (untrustedInput, ack) => {
+      respond(socket, 'room:leave', ack, () => {
+        const input = recordInput(untrustedInput);
+        if (Object.keys(input).length > 0) {
+          throw new SocketRuleError('INVALID_INPUT', 'Leave does not accept input');
+        }
+        const { room, player, token } = current(socket);
+        disconnectTimers.clear(token);
+        const handPlayer = room.hand?.players.find((candidate) => candidate.id === player.id);
+        if (room.phase === 'playing' && handPlayer !== undefined && !handPlayer.folded) {
+          commitHandTransition(room, forceFold(room.hand!, player.id), {
+            playerId: player.id,
+            type: 'fold',
+          });
+        }
+        rooms.leave(token, options.scheduler.now());
+        socket.data.roomCode = undefined;
+        socket.data.sessionToken = undefined;
+        socket.data.playerId = undefined;
+        void socket.leave(room.code);
+
+        const survivingRoom = rooms.getRoom(room.code);
+        if (survivingRoom === undefined) {
+          actionTimers.clear(room.code);
+          scheduledTurns.delete(room.code);
+          actionHistories.delete(room.code);
+          return {};
+        }
+        survivingRoom.version += 1;
+        scheduleNextAction(survivingRoom);
+        broadcast(survivingRoom);
+        return {};
       });
     });
     socket.on('room:update-settings', (untrustedInput, ack) => {

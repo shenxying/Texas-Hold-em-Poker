@@ -980,6 +980,132 @@ describe('poker socket server', () => {
 
     expect(server.rooms.getRoom(created.roomCode)).toBeUndefined();
   });
+
+  it('removes a waiting player and rejects its duplicate leave', async () => {
+    const server = await startTestServer({ randomCode: () => 'ABCD23', randomToken: (() => {
+      let token = 0;
+      return () => `token-${++token}`;
+    })() });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const waiter = await connectClient(server.url);
+    clients.push(host, waiter);
+    const created = await emitAck<{ roomCode: string }>(host, 'room:create', { nickname: '房主' });
+    for (let index = 0; index < 8; index += 1) {
+      await emitAck(host, 'room:add-bot', { style: 'balanced' });
+    }
+    const waiting = await emitAck<{ playerId: string; waitingPosition?: number }>(
+      waiter,
+      'room:join',
+      { roomCode: created.roomCode, nickname: '等待玩家' },
+    );
+
+    const invalid = await emitRawAck<{ ok: false; error: { code: string } }>(
+      waiter,
+      'room:leave',
+      { unexpected: true },
+    );
+    expect(invalid).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+
+    await emitAck(waiter, 'room:leave', {});
+
+    expect(server.rooms.getRoom(created.roomCode)!.waiting).toEqual([]);
+    await expect(emitAck(waiter, 'room:leave', {})).rejects.toMatchObject({
+      code: 'INVALID_SESSION',
+    });
+    expect(waiting.waitingPosition).toBe(1);
+  }, 1_000);
+
+  it('transfers a host who leaves between hands', async () => {
+    const server = await startTestServer({ randomCode: () => 'ABCD23', randomToken: (() => {
+      let token = 0;
+      return () => `token-${++token}`;
+    })() });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    clients.push(host, guest);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const joined = await emitAck<{ playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+
+    await emitAck(host, 'room:leave', {});
+
+    const snapshot = await nextSnapshot(
+      guest,
+      (view) => !view.players.some((player) => player.id === created.playerId),
+    );
+    expect(snapshot.players.find((player) => player.id === joined.playerId)?.isHost).toBe(true);
+  }, 1_000);
+
+  it('force-folds both active-hand actors and non-actors before removing them', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    const remaining = await connectClient(server.url);
+    clients.push(host, guest, remaining);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const joined = await emitAck<{ playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+    const survivor = await emitAck<{ playerId: string }>(remaining, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '留在牌桌',
+    });
+    await emitAck(host, 'game:start', {});
+    const room = server.rooms.getRoom(created.roomCode)!;
+    const guestCommitted = room.hand!.players.find((player) => player.id === joined.playerId)!.totalCommitted;
+
+    await emitAck(guest, 'room:leave', {});
+
+    expect(room.hand!.players.find((player) => player.id === joined.playerId)).toMatchObject({
+      folded: true,
+      totalCommitted: guestCommitted,
+    });
+    expect(room.seats.some((player) => player?.id === joined.playerId)).toBe(false);
+    await emitAck(host, 'room:leave', {});
+    expect(room.hand!.players.find((player) => player.id === created.playerId)).toMatchObject({
+      folded: true,
+    });
+    const snapshot = await nextSnapshot(
+      remaining,
+      (view) => !view.players.some((player) => player.id === created.playerId),
+    );
+    expect(snapshot.actorId).not.toBe(created.playerId);
+    expect(snapshot.players.some((player) => player.id === survivor.playerId)).toBe(true);
+  }, 1_000);
+
+  it('destroys a last-human room with bots on explicit leave', async () => {
+    const server = await startTestServer({ randomCode: () => 'ABCD23', randomToken: () => 'token-1' });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    clients.push(host);
+    const created = await emitAck<{ roomCode: string }>(host, 'room:create', { nickname: '房主' });
+    await emitAck(host, 'room:add-bot', { style: 'balanced' });
+
+    await emitAck(host, 'room:leave', {});
+
+    expect(server.rooms.getRoom(created.roomCode)).toBeUndefined();
+  }, 1_000);
 });
 
 describe('production server configuration', () => {
