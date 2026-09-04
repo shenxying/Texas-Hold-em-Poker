@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import type { TableView } from '../shared/protocol';
 import { ChatPanel } from './ChatPanel';
 import { RoomControls } from './RoomControls';
@@ -22,6 +22,25 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : '请求失败，请稍后重试';
 }
 
+function useNarrowScreen(): boolean {
+  const [narrow, setNarrow] = useState(() => (
+    typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(max-width: 760px)').matches
+      : false
+  ));
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return undefined;
+    const query = window.matchMedia('(max-width: 760px)');
+    const update = (): void => setNarrow(query.matches);
+    update();
+    query.addEventListener('change', update);
+    return () => query.removeEventListener('change', update);
+  }, []);
+
+  return narrow;
+}
+
 export function RoomSidePanel({
   openTab,
   client,
@@ -33,8 +52,63 @@ export function RoomSidePanel({
   onSelect,
   onError,
 }: RoomSidePanelProps): React.JSX.Element {
+  const panelRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const latestClose = useRef(onClose);
+  const narrowScreen = useNarrowScreen();
+  const panelOpen = openTab !== null;
   const isHost = view.players.some((player) => player.id === playerId && player.isHost);
   const tabs: RoomPanelTab[] = isHost ? ['chat', 'settings'] : ['chat'];
+  latestClose.current = onClose;
+
+  useEffect(() => {
+    if (!narrowScreen || !panelOpen) return undefined;
+    const panel = panelRef.current;
+    if (panel === null) return undefined;
+    const background = Array.from(document.querySelectorAll<HTMLElement>(
+      '.room-header, .table-stage, .player-dock',
+    ));
+    const priorInert = background.map((element) => element.hasAttribute('inert'));
+    background.forEach((element) => element.setAttribute('inert', ''));
+
+    const handleModalKey = (event: globalThis.KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        latestClose.current();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+      )).filter((element) => (
+        element.tabIndex >= 0 && element.closest('[hidden], [aria-hidden="true"]') === null
+      ));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !panel.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener('keydown', handleModalKey);
+    queueMicrotask(() => closeButtonRef.current?.focus());
+    return () => {
+      document.removeEventListener('keydown', handleModalKey);
+      background.forEach((element, index) => {
+        if (!priorInert[index]) element.removeAttribute('inert');
+      });
+    };
+  }, [narrowScreen, panelOpen]);
 
   function handleTabKey(event: KeyboardEvent<HTMLButtonElement>, current: RoomPanelTab): void {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
@@ -55,9 +129,13 @@ export function RoomSidePanel({
 
   return (
     <aside
+      ref={panelRef}
       id="room-side-panel"
       className={`room-side-panel${openTab === null ? ' closed' : ' open'}`}
       aria-label="房间侧边栏"
+      aria-modal={narrowScreen && panelOpen ? true : undefined}
+      role={narrowScreen ? 'dialog' : undefined}
+      tabIndex={narrowScreen ? -1 : undefined}
       data-testid="room-side-panel"
       hidden={openTab === null}
     >
@@ -90,7 +168,7 @@ export function RoomSidePanel({
             </button>
           )}
         </div>
-        <button type="button" className="side-panel-close" onClick={onClose}>
+        <button ref={closeButtonRef} type="button" className="side-panel-close" onClick={onClose}>
           关闭侧边栏
         </button>
       </div>

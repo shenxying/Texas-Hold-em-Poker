@@ -4,6 +4,7 @@ import { defineConfig } from 'vite';
 import { normalizeBasePath, pathWithinBase } from './src/shared/basePath';
 
 const basePath = normalizeBasePath(process.env.VITE_BASE_PATH);
+const serverTarget = process.env.VITE_SERVER_TARGET ?? 'http://localhost:3000';
 
 export default defineConfig({
   base: basePath === '' ? '/' : `${basePath}/`,
@@ -16,7 +17,7 @@ export default defineConfig({
   server: {
     proxy: {
       [pathWithinBase(basePath, 'socket.io')]: {
-        target: 'http://localhost:3000',
+        target: serverTarget,
         ws: true,
       },
     },

@@ -1,6 +1,8 @@
 /* @vitest-environment jsdom */
 
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -122,7 +124,23 @@ function cockpitProps(): {
   };
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+describe('cockpit CSS contract', () => {
+  const css = readFileSync(resolve(process.cwd(), 'src/client/styles.css'), 'utf8');
+
+  it('uses a bounded viewport shell with shrinkable stage and layered dock', () => {
+    expect(css).toMatch(/\.room-cockpit\s*\{[^}]*height:\s*100dvh/s);
+    expect(css).toMatch(/\.table-stage\s*\{[^}]*min-height:\s*0/s);
+    expect(css).toMatch(/\.player-dock\s*\{[^}]*z-index:/s);
+    expect(css).toMatch(/\.room-side-panel\s*\{[^}]*overflow:\s*hidden/s);
+    expect(css).not.toMatch(/\.action-drawer\s*\{/);
+    expect(css).toMatch(/@media\s*\(max-width:\s*760px\)[\s\S]*?\.room-cockpit\s*\{[^}]*flex-direction:\s*column/s);
+  });
+});
 
 describe('poker table privacy and presentation', () => {
   it('renders nine fixed seats, public table state, blind markers, and only the viewer hand face up', () => {
@@ -450,6 +468,58 @@ describe('chat and responsive drawers', () => {
     expect(panel).toHaveAttribute('hidden');
     expect(chatTrigger).toHaveAttribute('aria-expanded', 'false');
     expect(chatTrigger).toHaveFocus();
+  });
+
+  it('turns the narrow-screen panel into a modal drawer and restores its trigger on Escape', async () => {
+    vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({
+      matches: true,
+      media: '(max-width: 760px)',
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    render(<PokerRoom
+      {...cockpitProps()}
+      client={new FakePokerClient()}
+      view={viewWith({ phase: 'lobby', actorId: undefined, legalActions: undefined })}
+      playerId="me"
+      connected
+    />);
+
+    const trigger = screen.getByRole('button', { name: '聊天' });
+    await userEvent.click(trigger);
+    const drawer = screen.getByRole('dialog', { name: '房间侧边栏' });
+    expect(drawer).toHaveAttribute('aria-modal', 'true');
+    expect(document.querySelector('.room-header')).toHaveAttribute('inert');
+    expect(document.querySelector('.table-stage')).toHaveAttribute('inert');
+    expect(screen.getByRole('button', { name: '关闭侧边栏' })).toHaveFocus();
+
+    const first = screen.getByRole('tab', { name: '聊天' });
+    const message = screen.getByLabelText('聊天消息');
+    await userEvent.type(message, '循环焦点');
+    const last = screen.getByRole('button', { name: '发送' });
+    last.focus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(first).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(last).toHaveFocus();
+
+    await userEvent.click(screen.getByRole('tab', { name: '房主设置' }));
+    const settingsFirst = screen.getByRole('tab', { name: '房主设置' });
+    const settingsLast = screen.getByRole('button', { name: '移除 机器人' });
+    settingsFirst.focus();
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true });
+    expect(settingsLast).toHaveFocus();
+    fireEvent.keyDown(document, { key: 'Tab' });
+    expect(settingsFirst).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(drawer).toHaveAttribute('hidden'));
+    expect(document.querySelector('.room-header')).not.toHaveAttribute('inert');
+    expect(screen.getByRole('button', { name: '房主设置' })).toHaveFocus();
   });
 
   it('never exposes host settings to a guest', async () => {
