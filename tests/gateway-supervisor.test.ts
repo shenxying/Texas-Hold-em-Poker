@@ -1,6 +1,18 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { access, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  access,
+  chmod,
+  copyFile,
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -656,6 +668,89 @@ describe('runSupervisor', () => {
 });
 
 describe('shared-8080.sh', () => {
+  it('keeps the production runner PID identical to the supervisor PID', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-8080-production-runner-'));
+    temporaryPaths.push(root);
+    const scriptsDir = join(root, 'scripts');
+    const gatewayDir = join(root, 'src/gateway');
+    const stateDir = join(root, 'state');
+    const supervisorPidFile = join(root, 'fake-supervisor.pid');
+    const script = join(scriptsDir, 'shared-8080.sh');
+    const entrypoint = join(gatewayDir, 'supervisor.ts');
+    const repositoryRoot = resolve(import.meta.dirname, '..');
+    await mkdir(scriptsDir, { recursive: true });
+    await mkdir(gatewayDir, { recursive: true });
+    await copyFile(join(repositoryRoot, 'scripts/shared-8080.sh'), script);
+    await chmod(script, 0o755);
+    await symlink(join(repositoryRoot, 'node_modules'), join(root, 'node_modules'), 'dir');
+    await writeFile(entrypoint, `
+      import {
+        closeSync, openSync, readFileSync, unlinkSync, writeFileSync,
+      } from 'node:fs';
+      const pidFile: string = process.env.SHARED_STATE_DIR + '/supervisor.pid';
+      const descriptor = openSync(pidFile, 'wx', 0o600);
+      writeFileSync(descriptor, process.pid + '\\n');
+      closeSync(descriptor);
+      writeFileSync(process.env.FAKE_SUPERVISOR_PID_FILE, process.pid + '\\n');
+      const keepAlive = setInterval(() => {}, 1000);
+      let stopping: boolean = false;
+      const stop = (): void => {
+        if (stopping) return;
+        stopping = true;
+        clearInterval(keepAlive);
+        try {
+          if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) unlinkSync(pidFile);
+        } catch {}
+        process.exit(0);
+      };
+      process.on('SIGINT', stop);
+      process.on('SIGTERM', stop);
+      setTimeout(stop, 10_000);
+    `);
+    const healthServer = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"ok":true}');
+    });
+    const healthBase = await listen(healthServer);
+    const env = {
+      ...process.env,
+      NODE_ENV: 'test',
+      SHARED_STATE_DIR: stateDir,
+      SHARED_GATEWAY_READY_URL: `${healthBase}/ready`,
+      SHARED_POKER_READY_URL: `${healthBase}/poker/health`,
+      SHARED_START_TIMEOUT_SECONDS: '5',
+      SHARED_STOP_TIMEOUT_SECONDS: '5',
+      FAKE_SUPERVISOR_PID_FILE: supervisorPidFile,
+    };
+    let supervisorPid: number | undefined;
+
+    try {
+      const started = await execFileAsync('bash', [script, 'start'], { env });
+      supervisorPid = Number((await readFile(supervisorPidFile, 'utf8')).trim());
+      expect(started.stdout).toContain(`PID ${supervisorPid}`);
+      expect(await readFile(join(stateDir, 'supervisor.pid'), 'utf8')).toBe(
+        `${supervisorPid}\n`,
+      );
+
+      const status = await execFileAsync('bash', [script, 'status'], { env });
+      expect(status.stdout).toContain(`PID ${supervisorPid}`);
+      const stopped = await execFileAsync('bash', [script, 'stop'], { env });
+      expect(stopped.stdout).toMatch(/已停止/);
+      await waitFor(async () => !await processExists(supervisorPid!));
+    } finally {
+      await execFileAsync('bash', [script, 'stop'], { env }).catch(() => undefined);
+      if (supervisorPid === undefined) {
+        supervisorPid = Number(await readFile(supervisorPidFile, 'utf8').catch(() => 'NaN'));
+      }
+      if (Number.isInteger(supervisorPid) && await processExists(supervisorPid!)) {
+        process.kill(supervisorPid!, 'SIGTERM');
+        await waitFor(async () => !await processExists(supervisorPid!));
+      }
+      healthServer.close();
+      await once(healthServer, 'close');
+    }
+  }, 15_000);
+
   it('starts, reports, and stops only its fake owned supervisor and children', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-8080-test-'));
     temporaryPaths.push(root);

@@ -11,7 +11,7 @@ poker_ready_url="http://127.0.0.1:8080/poker/health"
 start_timeout_seconds=60
 stop_timeout_seconds=40
 stale_stop_barrier=""
-runner=("${repository_root}/node_modules/.bin/tsx")
+runner=("$(command -v node)" "--import" "${repository_root}/node_modules/tsx/dist/loader.mjs")
 
 if [[ -n "${SHARED_SUPERVISOR_ENTRY:-}" && "${NODE_ENV:-}" != "test" ]]; then
   echo "生产环境拒绝 SHARED_SUPERVISOR_ENTRY 覆盖" >&2
