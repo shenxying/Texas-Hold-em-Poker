@@ -226,6 +226,10 @@ function settleContested(state: HandState, events: GameEvent[]): void {
     const player = state.players.find((candidate) => candidate.id === playerId)!;
     player.stack += amount;
   }
+  for (const [playerId, amount] of Object.entries(settlement.refunds)) {
+    const player = state.players.find((candidate) => candidate.id === playerId)!;
+    player.stack += amount;
+  }
   const revealedPlayerIds = new Set(settlement.revealedPlayerIds);
   const revealedHands = state.players
     .filter((player) => revealedPlayerIds.has(player.id))

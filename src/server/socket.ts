@@ -276,9 +276,9 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         if (
           currentRoom !== room ||
           currentRoom.phase !== 'playing' ||
-          currentRoom.hand !== hand ||
+          currentRoom.hand !== scheduledTurn.hand ||
           scheduledTurns.get(room.code) !== scheduledTurn ||
-          currentRoom.hand.actorId !== actorId
+          scheduledTurn.hand.actorId !== actorId
         ) {
           return;
         }
@@ -298,13 +298,13 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
       if (
         currentRoom !== room ||
         currentRoom.phase !== 'playing' ||
-        currentRoom.hand !== hand ||
+        currentRoom.hand !== scheduledTurn.hand ||
         scheduledTurns.get(room.code) !== scheduledTurn ||
-        currentRoom.hand.actorId !== actorId
+        scheduledTurn.hand.actorId !== actorId
       ) {
         return;
       }
-      const legal = getLegalActions(hand, actorId);
+      const legal = getLegalActions(scheduledTurn.hand, actorId);
       const actionType: 'check' | 'fold' = legal.canCheck ? 'check' : 'fold';
       const action: PlayerAction = {
         playerId: actorId,
@@ -332,10 +332,25 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
     room: Room,
     transition: HandTransition,
     historyAction?: PlayerAction,
+    preserveCurrentTurn = false,
   ): void {
-    actionTimers.clear(room.code);
-    scheduledTurns.delete(room.code);
-    delete room.actionDeadline;
+    const previousHand = room.hand;
+    const scheduledTurn = scheduledTurns.get(room.code);
+    const canPreserveTurn =
+      preserveCurrentTurn &&
+      previousHand !== undefined &&
+      scheduledTurn?.room === room &&
+      scheduledTurn.hand === previousHand &&
+      scheduledTurn.actorId === transition.state.actorId &&
+      transition.state.street === previousHand.street &&
+      transition.state.street !== 'complete';
+    if (canPreserveTurn) {
+      scheduledTurn.hand = transition.state;
+    } else {
+      actionTimers.clear(room.code);
+      scheduledTurns.delete(room.code);
+      delete room.actionDeadline;
+    }
     if (historyAction !== undefined) {
       const history = actionHistories.get(room.code) ?? [];
       history.push({ ...historyAction });
@@ -515,10 +530,13 @@ export function registerPokerSocketHandlers(io: PokerIo, options: PokerSocketOpt
         disconnectTimers.clear(token);
         const handPlayer = room.hand?.players.find((candidate) => candidate.id === player.id);
         if (room.phase === 'playing' && handPlayer !== undefined && !handPlayer.folded) {
-          commitHandTransition(room, forceFold(room.hand!, player.id), {
-            playerId: player.id,
-            type: 'fold',
-          });
+          const wasActor = room.hand!.actorId === player.id;
+          commitHandTransition(
+            room,
+            forceFold(room.hand!, player.id),
+            { playerId: player.id, type: 'fold' },
+            !wasActor,
+          );
         }
         rooms.leave(token, options.scheduler.now());
         socket.data.roomCode = undefined;

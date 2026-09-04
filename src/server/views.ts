@@ -1,5 +1,5 @@
 import { getLegalActions } from '../game/engine';
-import { buildPots } from '../game/pots';
+import { buildPots, buildSettlementPotLayout } from '../game/pots';
 import type { Card } from '../game/types';
 import type { PublicPlayer, TableView } from '../shared/protocol';
 import type { Room, RoomPlayer } from './room';
@@ -33,6 +33,11 @@ function publicPlayer(room: Room, player: RoomPlayer, viewerPlayerId: string): P
 
 export function createTableView(room: Room, viewerPlayerId: string): TableView {
   const hand = room.hand;
+  const visiblePots = hand === undefined
+    ? []
+    : hand.street === 'complete' && hand.players.filter((player) => !player.folded).length > 1
+      ? buildSettlementPotLayout(hand.players).pots
+      : buildPots(hand.players);
   const players = room.seats
     .filter((player): player is RoomPlayer => player !== null)
     .map((player) => publicPlayer(room, player, viewerPlayerId));
@@ -52,7 +57,7 @@ export function createTableView(room: Room, viewerPlayerId: string): TableView {
     phase: room.phase,
     players,
     board: cloneCards(hand?.board ?? []),
-    pots: hand === undefined ? [] : buildPots(hand.players).map((pot) => ({ amount: pot.amount })),
+    pots: visiblePots.map((pot) => ({ amount: pot.amount })),
     ...(hand?.actorId ? { actorId: hand.actorId } : {}),
     ...(dealerSeatIndex === undefined ? {} : { dealerSeatIndex }),
     ...(legalActions === undefined ? {} : { legalActions }),

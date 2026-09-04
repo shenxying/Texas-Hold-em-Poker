@@ -13,8 +13,14 @@ export interface SettledPot extends Pot {
 
 export interface Settlement {
   payouts: Record<string, number>;
+  refunds: Record<string, number>;
   pots: SettledPot[];
   revealedPlayerIds: string[];
+}
+
+export interface SettlementPotLayout {
+  pots: Pot[];
+  refunds: Record<string, number>;
 }
 
 export function buildPots(players: readonly HandPlayer[]): Pot[] {
@@ -73,10 +79,63 @@ function winnersLeftOfDealer(state: HandState, winners: readonly string[]): stri
   return ordered;
 }
 
+function mergeUnclaimedLayers(pots: readonly Pot[]): Pot[] {
+  const merged: Pot[] = [];
+  let leadingUnclaimed = 0;
+  for (const pot of pots) {
+    if (pot.eligiblePlayerIds.length === 0) {
+      if (merged.length === 0) leadingUnclaimed += pot.amount;
+      else merged[merged.length - 1]!.amount += pot.amount;
+      continue;
+    }
+    merged.push({
+      amount: pot.amount + leadingUnclaimed,
+      eligiblePlayerIds: [...pot.eligiblePlayerIds],
+    });
+    leadingUnclaimed = 0;
+  }
+  if (leadingUnclaimed > 0) {
+    throw new Error('Cannot settle a pot without an eligible player');
+  }
+  return merged;
+}
+
+export function buildSettlementPotLayout(
+  players: readonly HandPlayer[],
+): SettlementPotLayout {
+  const refunds = new Map<string, number>();
+  const commitments = players
+    .map((player) => player.totalCommitted)
+    .sort((left, right) => right - left);
+  const highestCommitment = commitments[0] ?? 0;
+  const secondHighestCommitment = commitments[1] ?? 0;
+  const highestContributors = players.filter(
+    (player) => player.totalCommitted === highestCommitment,
+  );
+  let potPlayers = players;
+  if (highestContributors.length === 1 && highestCommitment > secondHighestCommitment) {
+    const contributor = highestContributors[0]!;
+    const uncalled = highestCommitment - secondHighestCommitment;
+    refunds.set(contributor.id, uncalled);
+    potPlayers = players.map((player) => (
+      player.id === contributor.id
+        ? { ...player, totalCommitted: secondHighestCommitment }
+        : player
+    ));
+  }
+
+  return {
+    pots: mergeUnclaimedLayers(buildPots(potPlayers)),
+    refunds: Object.fromEntries(refunds),
+  };
+}
+
 export function settleShowdown(state: HandState): Settlement {
   const playersById = new Map(state.players.map((player) => [player.id, player]));
   const payouts = new Map<string, number>();
-  const pots = buildPots(state.players).map<SettledPot>((pot) => {
+  const layout = buildSettlementPotLayout(state.players);
+
+  const pots = layout.pots.map<SettledPot>((pot) => {
     const winnerPlayerIds = winnersForPot(pot, playersById, state.board);
     const share = Math.floor(pot.amount / winnerPlayerIds.length);
     let remainder = pot.amount % winnerPlayerIds.length;
@@ -102,5 +161,10 @@ export function settleShowdown(state: HandState): Settlement {
   const revealedPlayerIds = state.players
     .filter((player) => !player.folded && player.totalCommitted > 0)
     .map((player) => player.id);
-  return { payouts: Object.fromEntries(payouts), pots, revealedPlayerIds };
+  return {
+    payouts: Object.fromEntries(payouts),
+    refunds: layout.refunds,
+    pots,
+    revealedPlayerIds,
+  };
 }

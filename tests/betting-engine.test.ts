@@ -7,6 +7,7 @@ import {
   getLegalActions,
 } from '../src/game/engine';
 import type { HandPlayer, HandState } from '../src/game/types';
+import { handAtShowdown } from './support/hands';
 
 const seats = [
   { id: 'p1', stack: 10_000 },
@@ -510,7 +511,7 @@ describe('betting engine', () => {
   it('force-folds the actor and advances to the next eligible player', () => {
     const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
     const transition = forceFold(state, state.actorId!);
-    expect(transition.state.actorId).not.toBe(state.actorId);
+    expect(transition.state.actorId).toBe('p2');
     expect(transition.events).toContainEqual({ type: 'player-acted', action: { playerId: state.actorId, type: 'fold' } });
   });
 
@@ -541,5 +542,29 @@ describe('betting engine', () => {
     expect(transition.state.players.find((player) => player.id === 'p2')).toMatchObject({ folded: true, allIn: true });
     expect(transition.state.actorId).toBe('p1');
     expect(transition.state.street).toBe('preflop');
+  });
+
+  it('refunds an all-in leaver only their uncalled excess and conserves every chip', () => {
+    const state = handAtShowdown({ dealerIndex: 0, pot: 1_000, tiedPlayerIds: ['p1', 'p2'] });
+    state.players.push({
+      ...structuredClone(state.players[0]!),
+      id: 'leaver',
+      totalCommitted: 1_000,
+      folded: false,
+    });
+
+    const transition = forceFold(state, 'leaver');
+    const settled = transition.events.find((event) => event.type === 'hand-settled');
+
+    expect(transition.state.players.find((player) => player.id === 'leaver')).toMatchObject({
+      folded: true,
+      stack: 500,
+      totalCommitted: 1_000,
+    });
+    expect(transition.state.players.reduce((sum, player) => sum + player.stack, 0)).toBe(2_000);
+    expect(settled?.type === 'hand-settled' ? settled.settlement.refunds : undefined).toEqual({
+      leaver: 500,
+    });
+    expect(settled?.type === 'hand-settled' ? settled.settlement.payouts.leaver : undefined).toBeUndefined();
   });
 });

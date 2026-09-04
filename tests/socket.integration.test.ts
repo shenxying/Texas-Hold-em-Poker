@@ -1094,6 +1094,121 @@ describe('poker socket server', () => {
     expect(snapshot.players.some((player) => player.id === survivor.playerId)).toBe(true);
   }, 1_000);
 
+  it('conserves a departing all-in over-contributor through multi-player settlement', async () => {
+    const server = await startTestServer({
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    const third = await connectClient(server.url);
+    clients.push(host, guest, third);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const joined = await emitAck<{ playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+    const thirdSeat = await emitAck<{ playerId: string }>(third, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '第三位',
+    });
+    await emitAck(host, 'game:start', {});
+
+    const room = server.rooms.getRoom(created.roomCode)!;
+    const hand = room.hand!;
+    hand.board = hand.deck.splice(0, 5);
+    hand.street = 'showdown';
+    hand.actorId = null;
+    hand.currentBet = 0;
+    for (const player of hand.players) {
+      player.stack = 0;
+      player.streetBet = 0;
+      player.totalCommitted = player.id === created.playerId ? 1_000 : 500;
+      player.allIn = true;
+      player.folded = false;
+      player.actedSinceFullRaise = true;
+    }
+
+    await emitAck(host, 'room:leave', {});
+
+    const settledView = await nextSnapshot(guest, (view) => view.phase === 'between-hands');
+    expect(room.phase).toBe('between-hands');
+    expect(room.hand!.players.reduce((sum, player) => sum + player.stack, 0)).toBe(2_000);
+    expect(room.hand!.players.find((player) => player.id === created.playerId)).toMatchObject({
+      folded: true,
+      stack: 500,
+      totalCommitted: 1_000,
+    });
+    expect(room.seats
+      .filter((player) => player?.id === joined.playerId || player?.id === thirdSeat.playerId)
+      .reduce((sum, player) => sum + (player?.stack ?? 0), 0)).toBe(1_500);
+    expect(settledView.pots).toEqual([{ amount: 1_500 }]);
+  }, 1_000);
+
+  it('preserves the current human deadline when a non-actor leaves', async () => {
+    const scheduler = new ManualScheduler();
+    const server = await startTestServer({
+      scheduler,
+      randomCode: () => 'ABCD23',
+      randomToken: (() => {
+        let token = 0;
+        return () => `token-${++token}`;
+      })(),
+      randomInt: () => 0,
+    });
+    servers.push(server);
+    const host = await connectClient(server.url);
+    const guest = await connectClient(server.url);
+    const third = await connectClient(server.url);
+    clients.push(host, guest, third);
+    const created = await emitAck<{ roomCode: string; playerId: string }>(
+      host,
+      'room:create',
+      { nickname: '房主' },
+    );
+    const joined = await emitAck<{ playerId: string }>(guest, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '朋友',
+    });
+    const thirdSeat = await emitAck<{ playerId: string }>(third, 'room:join', {
+      roomCode: created.roomCode,
+      nickname: '第三位',
+    });
+    await emitAck(host, 'game:start', {});
+
+    const room = server.rooms.getRoom(created.roomCode)!;
+    const actorId = room.hand!.actorId!;
+    const actorNickname = room.seats.find((player) => player?.id === actorId)!.nickname;
+    const nonActor = [
+      { client: host, playerId: created.playerId },
+      { client: guest, playerId: joined.playerId },
+      { client: third, playerId: thirdSeat.playerId },
+    ].find((entry) => entry.playerId !== actorId)!;
+    const originalDeadline = room.actionDeadline;
+    const originalTimeout = scheduler.callbacks()[0];
+    scheduler.advanceBy(5_000);
+
+    await emitAck(nonActor.client, 'room:leave', {});
+
+    expect(room.hand?.actorId).toBe(actorId);
+    expect(room.actionDeadline).toBe(originalDeadline);
+    expect(scheduler.pendingCount()).toBe(1);
+    expect(scheduler.callbacks()[0]).toBe(originalTimeout);
+    scheduler.advanceBy(25_000);
+    expect(room.messages.map((message) => message.text)).toContain(
+      `${actorNickname} 超时，自动弃牌`,
+    );
+  });
+
   it('destroys a last-human room with bots on explicit leave', async () => {
     const server = await startTestServer({ randomCode: () => 'ABCD23', randomToken: () => 'token-1' });
     servers.push(server);

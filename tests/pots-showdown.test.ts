@@ -105,4 +105,59 @@ describe('pots and showdown', () => {
     );
     expect(second.events).toEqual([]);
   });
+
+  it('returns a sole uncalled excess even when that player folded before showdown', () => {
+    const state = handAtShowdown({ dealerIndex: 0, pot: 1_000, tiedPlayerIds: ['p1', 'p2'] });
+    state.players.push({
+      ...structuredClone(state.players[0]!),
+      id: 'leaver',
+      totalCommitted: 1_000,
+      folded: true,
+    });
+
+    const settlement = settleShowdown(state);
+    const transition = advanceAutomatic(state);
+
+    expect(settlement.refunds).toEqual({ leaver: 500 });
+    expect(
+      Object.values(settlement.payouts).reduce((sum, amount) => sum + amount, 0) +
+      Object.values(settlement.refunds).reduce((sum, amount) => sum + amount, 0),
+    ).toBe(2_000);
+    expect(transition.state.players.reduce((sum, player) => sum + player.stack, 0)).toBe(2_000);
+    expect(transition.state.players.find((player) => player.id === 'leaver')?.stack).toBe(500);
+  });
+
+  it('merges a matched side layer back into the nearest contested pot when everyone eligible folded', () => {
+    const state = handAtShowdown({ dealerIndex: 0, pot: 1_000, tiedPlayerIds: ['p1', 'p2'] });
+    state.players.push(
+      {
+        ...structuredClone(state.players[0]!),
+        id: 'folded-1',
+        totalCommitted: 1_000,
+        folded: true,
+      },
+      {
+        ...structuredClone(state.players[0]!),
+        id: 'folded-2',
+        totalCommitted: 1_000,
+        folded: true,
+      },
+    );
+
+    const settlement = settleShowdown(state);
+    const transition = advanceAutomatic(state);
+
+    expect(settlement.refunds).toEqual({});
+    expect(settlement.pots).toHaveLength(1);
+    expect(settlement.pots[0]).toMatchObject({ amount: 3_000, eligiblePlayerIds: ['p1', 'p2'] });
+    expect(Object.values(settlement.payouts).reduce((sum, amount) => sum + amount, 0)).toBe(3_000);
+    expect(transition.state.players.reduce((sum, player) => sum + player.stack, 0)).toBe(3_000);
+  });
+
+  it('fails closed instead of silently losing a pot when nobody is eligible', () => {
+    const state = handAtShowdown({ dealerIndex: 0, pot: 100, tiedPlayerIds: ['p1', 'p2'] });
+    state.players.forEach((player) => { player.folded = true; });
+
+    expect(() => settleShowdown(state)).toThrow('Cannot settle a pot without an eligible player');
+  });
 });
