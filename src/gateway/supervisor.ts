@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -18,6 +18,16 @@ export interface OwnedChild {
   pid: number;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
   signal(signal: NodeJS.Signals): void;
+}
+
+export interface SpawnedChildLike {
+  pid?: number;
+  once(event: 'error', listener: (error: Error) => void): this;
+  once(
+    event: 'exit',
+    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): this;
+  kill(signal: NodeJS.Signals): boolean;
 }
 
 export interface SupervisorClock {
@@ -40,6 +50,7 @@ export interface SupervisorOptions {
   pidFile?: string;
   readyTimeoutMs?: number;
   shutdownTimeoutMs?: number;
+  killTimeoutMs?: number;
   stopAfterReady?: boolean;
 }
 
@@ -65,21 +76,73 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function writeOwnedPidFile(pidFile: string): Promise<void> {
+function parsePid(contents: string): number | undefined {
+  const value = contents.trim();
+  if (!/^[1-9]\d*$/.test(value)) return undefined;
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) ? pid : undefined;
+}
+
+async function acquireOwnedPidFile(
+  pidFile: string,
+  clock: SupervisorClock,
+): Promise<void> {
   await mkdir(dirname(pidFile), { recursive: true });
-  try {
-    const existingText = await readFile(pidFile, 'utf8');
-    const existingPid = Number(existingText.trim());
-    if (!Number.isSafeInteger(existingPid) || existingPid <= 0) {
-      throw new Error(`PID 文件格式无效：${pidFile}`);
+  for (;;) {
+    try {
+      const handle = await open(pidFile, 'wx', 0o600);
+      try {
+        await handle.writeFile(`${process.pid}\n`);
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
-    if (existingPid !== process.pid && processExists(existingPid)) {
+
+    let observed: string;
+    let observedStat;
+    try {
+      [observed, observedStat] = await Promise.all([
+        readFile(pidFile, 'utf8'),
+        lstat(pidFile),
+      ]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    let existingPid = parsePid(observed);
+    if (existingPid !== undefined && processExists(existingPid)) {
       throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+
+    if (existingPid === undefined) {
+      await clock.sleep(25);
+      try {
+        const settled = await readFile(pidFile, 'utf8');
+        if (settled !== observed) continue;
+        existingPid = parsePid(settled);
+        if (existingPid !== undefined && processExists(existingPid)) {
+          throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+    }
+
+    try {
+      const currentStat = await lstat(pidFile);
+      const current = await readFile(pidFile, 'utf8');
+      if (currentStat.dev !== observedStat.dev || currentStat.ino !== observedStat.ino ||
+          current !== observed) continue;
+      await rm(pidFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
-  await writeFile(pidFile, `${process.pid}\n`, { mode: 0o600 });
 }
 
 async function removeOwnedPidFile(pidFile: string): Promise<void> {
@@ -91,20 +154,17 @@ async function removeOwnedPidFile(pidFile: string): Promise<void> {
   }
 }
 
-function defaultSpawnChild(spec: ChildSpec): OwnedChild {
-  const child = spawn(spec.command, spec.args, {
-    cwd: spec.cwd,
-    env: spec.env,
-    shell: false,
-    stdio: 'inherit',
-  });
-  if (child.pid === undefined) throw new Error(`无法启动 ${spec.name}`);
+export function trackSpawnedChild(
+  spec: ChildSpec,
+  child: SpawnedChildLike,
+): OwnedChild {
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolveExit) => {
       child.once('error', () => resolveExit({ code: 1, signal: null }));
       child.once('exit', (code, signal) => resolveExit({ code, signal }));
     },
   );
+  if (child.pid === undefined) throw new Error(`无法启动 ${spec.name}`);
   return {
     pid: child.pid,
     exited,
@@ -112,6 +172,16 @@ function defaultSpawnChild(spec: ChildSpec): OwnedChild {
       child.kill(signal);
     },
   };
+}
+
+function defaultSpawnChild(spec: ChildSpec): OwnedChild {
+  const child = spawn(spec.command, spec.args, {
+    cwd: spec.cwd,
+    env: spec.env,
+    shell: false,
+    stdio: 'inherit',
+  });
+  return trackSpawnedChild(spec, child);
 }
 
 async function waitForHttpReady(
@@ -215,21 +285,29 @@ async function waitForExit(
 
 async function stopChildren(
   children: TrackedChild[],
-  timeoutMs: number,
+  termTimeoutMs: number,
+  killTimeoutMs: number,
   clock: SupervisorClock,
   log: (message: string) => void,
 ): Promise<void> {
+  const failures: Error[] = [];
   for (const tracked of [...children].reverse()) {
     if (tracked.result !== undefined) continue;
     log(`正在停止 ${tracked.spec.name}（PID ${tracked.child.pid}）`);
     tracked.child.signal('SIGTERM');
-    if (await waitForExit(tracked, timeoutMs, clock)) continue;
+    if (await waitForExit(tracked, termTimeoutMs, clock)) continue;
     if (tracked.result === undefined) {
       log(`${tracked.spec.name} 未在期限内退出，发送 SIGKILL`);
       tracked.child.signal('SIGKILL');
-      await waitForExit(tracked, timeoutMs, clock);
+      if (!await waitForExit(tracked, killTimeoutMs, clock)) {
+        failures.push(new Error(
+          `${tracked.spec.name} 收到 SIGKILL 后仍未退出（PID ${tracked.child.pid}）`,
+        ));
+      }
     }
   }
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, '多个子进程未能退出');
 }
 
 export async function runSupervisor(options: SupervisorOptions = {}): Promise<void> {
@@ -245,9 +323,14 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
   const pidFile = options.pidFile ?? resolve(repositoryRoot, 'var/shared-8080/supervisor.pid');
   const readyTimeoutMs = options.readyTimeoutMs ?? 60_000;
   const shutdownTimeoutMs = options.shutdownTimeoutMs ?? 5_000;
+  const killTimeoutMs = options.killTimeoutMs ?? 5_000;
   const children: TrackedChild[] = [];
   let stopping = false;
   let resolveSignal!: () => void;
+  let rejectFatalExit!: (error: Error) => void;
+  const fatalExit = new Promise<never>((_resolve, reject) => {
+    rejectFatalExit = reject;
+  });
   const signalReceived = new Promise<void>((resolveStop) => {
     resolveSignal = resolveStop;
   });
@@ -261,7 +344,7 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
 
   let ownsPidFile = false;
   try {
-    await writeOwnedPidFile(pidFile);
+    await acquireOwnedPidFile(pidFile, clock);
     ownsPidFile = true;
     for (const spec of specs) {
       if (stopping) break;
@@ -269,13 +352,13 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
       const child = spawnChild(spec);
       const tracked: TrackedChild = { spec, child };
       children.push(tracked);
-      const exitWatch = child.exited.then((result) => {
+      void child.exited.then((result) => {
         tracked.result = result;
-        throw unexpectedExitError(tracked, result);
+        if (!stopping) rejectFatalExit(unexpectedExitError(tracked, result));
       });
       await Promise.race([
         waitUntilReady(spec.readyUrl, readyTimeoutMs),
-        exitWatch,
+        fatalExit,
         signalReceived,
       ]);
       if (stopping) break;
@@ -285,16 +368,14 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
     if (!stopping && children.length === specs.length && !options.stopAfterReady) {
       await Promise.race([
         signalReceived,
-        ...children.map((tracked) => tracked.child.exited.then((result) => {
-          tracked.result = result;
-          throw unexpectedExitError(tracked, result);
-        })),
+        fatalExit,
       ]);
     }
   } finally {
+    stopping = true;
     signalSource.off('SIGINT', requestStop);
     signalSource.off('SIGTERM', requestStop);
-    await stopChildren(children, shutdownTimeoutMs, clock, log);
+    await stopChildren(children, shutdownTimeoutMs, killTimeoutMs, clock, log);
     if (ownsPidFile) await removeOwnedPidFile(pidFile);
   }
 }

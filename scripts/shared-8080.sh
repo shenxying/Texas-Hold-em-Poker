@@ -9,7 +9,7 @@ supervisor_entry="${default_entry}"
 gateway_ready_url="http://127.0.0.1:8080/ready"
 poker_ready_url="http://127.0.0.1:8080/poker/health"
 start_timeout_seconds=60
-stop_timeout_seconds=15
+stop_timeout_seconds=40
 runner=("${repository_root}/node_modules/.bin/tsx")
 
 if [[ -n "${SHARED_SUPERVISOR_ENTRY:-}" && "${NODE_ENV:-}" != "test" ]]; then
@@ -69,16 +69,6 @@ pid_is_owned() {
   return 1
 }
 
-remove_pid_if_matches() {
-  local expected_pid="$1"
-  [[ -f "${pid_file}" ]] || return 0
-  local current_pid
-  current_pid="$(read_supervisor_pid)" || return $?
-  if [[ "${current_pid}" == "${expected_pid}" ]]; then
-    rm -f -- "${pid_file}"
-  fi
-}
-
 wait_until_gone() {
   local pid="$1"
   local deadline=$((SECONDS + stop_timeout_seconds))
@@ -120,13 +110,42 @@ wait_http() {
   return 1
 }
 
+wait_for_pid_publication() {
+  local candidate_pid="$1"
+  local deadline=$((SECONDS + start_timeout_seconds))
+  while (( SECONDS < deadline )); do
+    if [[ -f "${pid_file}" ]]; then
+      local published_value published_pid
+      published_value="$(<"${pid_file}")"
+      if [[ "${published_value}" =~ ^[1-9][0-9]*$ ]]; then
+        published_pid="${published_value}"
+        if [[ "${published_pid}" == "${candidate_pid}" ]]; then
+          return 0
+        fi
+        if pid_is_alive "${published_pid}"; then
+          echo "另一共享 supervisor 已取得租约（PID ${published_pid}）" >&2
+          return 2
+        fi
+      fi
+    fi
+    if ! pid_is_alive "${candidate_pid}"; then
+      echo "本次 supervisor 未取得 PID 租约即退出，请检查 ${log_file}" >&2
+      return 1
+    fi
+    sleep 0.05
+  done
+  echo "等待 supervisor 原子发布 PID 超时，请检查 ${log_file}" >&2
+  return 1
+}
+
 start_services() {
   mkdir -p -- "${state_dir}"
   chmod 700 -- "${state_dir}"
   if [[ -f "${pid_file}" ]]; then
-    local existing_pid
-    existing_pid="$(read_supervisor_pid)" || return $?
-    if pid_is_alive "${existing_pid}"; then
+    local existing_value existing_pid
+    existing_value="$(<"${pid_file}")"
+    if [[ "${existing_value}" =~ ^[1-9][0-9]*$ ]] &&
+       existing_pid="${existing_value}" && pid_is_alive "${existing_pid}"; then
       if pid_is_owned "${existing_pid}"; then
         echo "共享 8080 服务已在运行（PID ${existing_pid}）" >&2
       else
@@ -134,20 +153,22 @@ start_services() {
       fi
       return 1
     fi
-    rm -f -- "${pid_file}"
   fi
 
   umask 077
   nohup "${runner[@]}" "${supervisor_entry}" >>"${log_file}" 2>&1 &
   local supervisor_pid=$!
-  printf '%s\n' "${supervisor_pid}" > "${pid_file}"
+
+  if ! wait_for_pid_publication "${supervisor_pid}"; then
+    return 1
+  fi
 
   if ! wait_http "${gateway_ready_url}" "${supervisor_pid}" ||
      ! wait_http "${poker_ready_url}" "${supervisor_pid}"; then
-    if pid_is_alive "${supervisor_pid}" && pid_is_owned "${supervisor_pid}"; then
+    if [[ "$(<"${pid_file}")" == "${supervisor_pid}" ]] &&
+       pid_is_alive "${supervisor_pid}" && pid_is_owned "${supervisor_pid}"; then
       stop_owned_pid "${supervisor_pid}" || true
     fi
-    remove_pid_if_matches "${supervisor_pid}" || true
     return 1
   fi
   echo "共享 8080 服务已启动（PID ${supervisor_pid}）"
@@ -170,7 +191,14 @@ stop_services() {
     return 1
   fi
   stop_owned_pid "${supervisor_pid}"
-  remove_pid_if_matches "${supervisor_pid}"
+  if [[ -f "${pid_file}" ]]; then
+    local remaining_pid
+    remaining_pid="$(read_supervisor_pid)" || return $?
+    if [[ "${remaining_pid}" == "${supervisor_pid}" ]]; then
+      echo "supervisor 未完成全部子进程清理；保留 PID 文件供诊断" >&2
+      return 1
+    fi
+  fi
   echo "共享 8080 服务已停止"
 }
 

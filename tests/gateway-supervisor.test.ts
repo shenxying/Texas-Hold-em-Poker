@@ -10,8 +10,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   createDefaultChildSpecs,
   runSupervisor,
+  trackSpawnedChild,
   type ChildSpec,
   type OwnedChild,
+  type SpawnedChildLike,
   type SupervisorOptions,
 } from '../src/gateway/supervisor';
 
@@ -107,6 +109,40 @@ afterEach(async () => {
 });
 
 describe('runSupervisor', () => {
+  it('atomically allows only one concurrent supervisor to spawn Drawing', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-race-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const readyGate = deferred<void>();
+    const events: string[] = [];
+    const outcomes: Array<'fulfilled' | 'rejected'> = [];
+    const makeOptions = (): SupervisorOptions => fixture(events, {
+      pidFile,
+      stopAfterReady: true,
+      waitUntilReady: async () => readyGate.promise,
+    });
+
+    const first = runSupervisor(makeOptions()).then(
+      () => outcomes.push('fulfilled'),
+      () => outcomes.push('rejected'),
+    );
+    const second = runSupervisor(makeOptions()).then(
+      () => outcomes.push('fulfilled'),
+      () => outcomes.push('rejected'),
+    );
+
+    try {
+      await waitFor(() => outcomes.includes('rejected') ||
+        events.filter((event) => event === 'spawn:drawing').length > 1);
+      expect(events.filter((event) => event === 'spawn:drawing')).toHaveLength(1);
+      expect(outcomes).toEqual(['rejected']);
+    } finally {
+      readyGate.resolve(undefined);
+      await Promise.all([first, second]);
+    }
+    expect(events.filter((event) => event.startsWith('spawn:'))).toHaveLength(3);
+  });
+
   it('starts drawing, poker, then gateway only after each service is ready', async () => {
     const events: string[] = [];
 
@@ -134,6 +170,55 @@ describe('runSupervisor', () => {
     expect(events).toEqual([
       'spawn:drawing', 'ready:drawing',
       'spawn:poker', 'stop:poker', 'stop:drawing',
+    ]);
+  });
+
+  it('aborts Poker readiness when an already-ready Drawing child exits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-prior-exit-'));
+    temporaryPaths.push(root);
+    const events: string[] = [];
+    const exits = new Map<ChildSpec['name'], ReturnType<typeof deferred<{
+      code: number | null;
+      signal: NodeJS.Signals | null;
+    }>>>();
+
+    const running = runSupervisor({
+      specs: fakeSpecs(),
+      pidFile: join(root, 'supervisor.pid'),
+      stopAfterReady: true,
+      spawnChild(spec) {
+        events.push(`spawn:${spec.name}`);
+        const exit = deferred<{ code: number | null; signal: NodeJS.Signals | null }>();
+        exits.set(spec.name, exit);
+        return {
+          pid: 40_000 + exits.size,
+          exited: exit.promise,
+          signal(signal) {
+            events.push(`stop:${spec.name}`);
+            exit.resolve({ code: null, signal });
+          },
+        };
+      },
+      async waitUntilReady(url) {
+        const name = url.slice(url.lastIndexOf('/') + 1) as ChildSpec['name'];
+        if (name === 'drawing') {
+          events.push('ready:drawing');
+          return;
+        }
+        if (name === 'poker') {
+          queueMicrotask(() => {
+            events.push('exit:drawing');
+            exits.get('drawing')?.resolve({ code: 9, signal: null });
+          });
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+        }
+      },
+    });
+
+    await expect(running).rejects.toThrow(/drawing.*9/i);
+    expect(events).toEqual([
+      'spawn:drawing', 'ready:drawing', 'spawn:poker',
+      'exit:drawing', 'stop:poker',
     ]);
   });
 
@@ -200,6 +285,121 @@ describe('runSupervisor', () => {
     ]);
   });
 
+  it('waits for three TERM-resistant children to exit after KILL in reverse order', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-kill-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const events: string[] = [];
+    let nextPid = 20_000;
+
+    await runSupervisor({
+      specs: fakeSpecs(),
+      pidFile,
+      stopAfterReady: true,
+      shutdownTimeoutMs: 2,
+      killTimeoutMs: 100,
+      waitUntilReady: async () => undefined,
+      spawnChild(spec) {
+        const exit = deferred<{ code: number | null; signal: NodeJS.Signals | null }>();
+        let killed = false;
+        return {
+          pid: nextPid++,
+          exited: exit.promise,
+          signal(signal) {
+            events.push(`${signal}:${spec.name}`);
+            if (signal === 'SIGKILL' && !killed) {
+              killed = true;
+              setTimeout(() => {
+                events.push(`exit:${spec.name}`);
+                exit.resolve({ code: null, signal });
+              }, 10);
+            }
+          },
+        };
+      },
+    });
+
+    expect(events).toEqual([
+      'SIGTERM:gateway', 'SIGKILL:gateway', 'exit:gateway',
+      'SIGTERM:poker', 'SIGKILL:poker', 'exit:poker',
+      'SIGTERM:drawing', 'SIGKILL:drawing', 'exit:drawing',
+    ]);
+    await expect(access(pidFile)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('fails shutdown and keeps PID ownership when a child survives SIGKILL', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-stuck-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const events: string[] = [];
+
+    await expect(runSupervisor({
+      specs: [fakeSpecs()[0]!],
+      pidFile,
+      stopAfterReady: true,
+      shutdownTimeoutMs: 1,
+      killTimeoutMs: 1,
+      waitUntilReady: async () => undefined,
+      spawnChild(spec) {
+        return {
+          pid: 30_000,
+          exited: new Promise(() => undefined),
+          signal(signal) {
+            events.push(`${signal}:${spec.name}`);
+          },
+        };
+      },
+    })).rejects.toThrow(/drawing.*SIGKILL.*未退出/i);
+
+    expect(events).toEqual(['SIGTERM:drawing', 'SIGKILL:drawing']);
+    expect(await readFile(pidFile, 'utf8')).toBe(`${process.pid}\n`);
+  });
+
+  it.each([
+    { failingIndex: 1, expected: [
+      'spawn:drawing', 'ready:drawing', 'spawn:poker', 'stop:drawing',
+    ] },
+    { failingIndex: 2, expected: [
+      'spawn:drawing', 'ready:drawing', 'spawn:poker', 'ready:poker',
+      'spawn:gateway', 'stop:poker', 'stop:drawing',
+    ] },
+  ])('cleans prior owned children when service $failingIndex spawn has no PID', async ({
+    failingIndex,
+    expected,
+  }) => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-spawn-error-'));
+    temporaryPaths.push(root);
+    const events: string[] = [];
+    let index = 0;
+
+    await expect(runSupervisor({
+      specs: fakeSpecs(),
+      pidFile: join(root, 'supervisor.pid'),
+      stopAfterReady: true,
+      async waitUntilReady(url) {
+        events.push(`ready:${url.slice(url.lastIndexOf('/') + 1)}`);
+      },
+      spawnChild(spec) {
+        const currentIndex = index++;
+        events.push(`spawn:${spec.name}`);
+        const emitter = new EventEmitter();
+        const child = emitter as unknown as SpawnedChildLike;
+        child.pid = currentIndex === failingIndex ? undefined : 50_000 + currentIndex;
+        child.kill = (signal) => {
+          events.push(`stop:${spec.name}`);
+          queueMicrotask(() => emitter.emit('exit', null, signal));
+          return true;
+        };
+        if (child.pid === undefined) {
+          queueMicrotask(() => emitter.emit('error', new Error(`${spec.name} spawn failed`)));
+        }
+        return trackSpawnedChild(spec, child);
+      },
+    })).rejects.toThrow(new RegExp(`无法启动 ${fakeSpecs()[failingIndex]?.name}`));
+
+    expect(events).toEqual(expected);
+  });
+
   it('uses the explicit production commands, loopback binds, and existing Drawing data paths', async () => {
     const repositoryRoot = resolve(import.meta.dirname, '..');
     const specs = createDefaultChildSpecs(repositoryRoot, {});
@@ -247,22 +447,21 @@ describe('runSupervisor', () => {
     });
   });
 
-  it('removes signal handlers when PID ownership validation fails', async () => {
+  it('safely recovers a stable malformed PID file and removes signal handlers', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-invalid-pid-'));
     temporaryPaths.push(root);
     const pidFile = join(root, 'supervisor.pid');
     await writeFile(pidFile, 'not-a-pid\n');
     const signals = new EventEmitter();
+    const events: string[] = [];
 
-    await expect(runSupervisor({
-      specs: fakeSpecs(),
+    await runSupervisor(fixture(events, {
       pidFile,
       signalSource: signals,
-      spawnChild() {
-        throw new Error('must not spawn');
-      },
-    })).rejects.toThrow(/PID 文件格式无效/);
+    }));
 
+    expect(events.filter((event) => event.startsWith('spawn:'))).toHaveLength(3);
+    await expect(access(pidFile)).rejects.toMatchObject({ code: 'ENOENT' });
     expect(signals.listenerCount('SIGINT')).toBe(0);
     expect(signals.listenerCount('SIGTERM')).toBe(0);
   });
@@ -277,18 +476,31 @@ describe('shared-8080.sh', () => {
     const entrypoint = join(root, 'fake-supervisor.mjs');
     await writeFile(entrypoint, `
       import { spawn } from 'node:child_process';
-      import { writeFileSync } from 'node:fs';
+      import { closeSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+      const pidFile = process.env.SHARED_STATE_DIR + '/supervisor.pid';
+      try {
+        const descriptor = openSync(pidFile, 'wx', 0o600);
+        writeFileSync(descriptor, process.pid + '\\n');
+        closeSync(descriptor);
+      } catch {
+        process.exit(17);
+      }
       const children = ['drawing', 'poker', 'gateway'].map(() =>
         spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));
       writeFileSync(process.env.FAKE_CHILD_PID_FILE,
         JSON.stringify(children.map((child) => child.pid)));
       let stopping = false;
+      const releasePid = () => {
+        try {
+          if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) unlinkSync(pidFile);
+        } catch {}
+      };
       const stop = () => {
         if (stopping) return;
         stopping = true;
         for (const child of children) child.kill('SIGTERM');
         Promise.all(children.map((child) => new Promise((resolve) => child.once('exit', resolve))))
-          .then(() => process.exit(0));
+          .then(() => { releasePid(); process.exit(0); });
       };
       process.on('SIGINT', stop);
       process.on('SIGTERM', stop);
@@ -335,6 +547,73 @@ describe('shared-8080.sh', () => {
       expect(stopped.stdout).toMatch(/已停止/);
       expect(Date.now() - stopStartedAt).toBeLessThan(2_000);
       await waitFor(async () => (await Promise.all(childPids.map(processExists))).every((alive) => !alive));
+    } finally {
+      await execFileAsync('bash', [script, 'stop'], { env }).catch(() => undefined);
+      healthServer.close();
+      await once(healthServer, 'close');
+    }
+  }, 15_000);
+
+  it('allows only one of two concurrent start commands to publish and spawn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-8080-start-race-'));
+    temporaryPaths.push(root);
+    const stateDir = join(root, 'state');
+    const marker = join(root, 'drawing-starts.log');
+    const entrypoint = join(root, 'fake-racing-supervisor.mjs');
+    await writeFile(entrypoint, `
+      import {
+        appendFileSync, closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync,
+      } from 'node:fs';
+      mkdirSync(process.env.SHARED_STATE_DIR, { recursive: true });
+      const pidFile = process.env.SHARED_STATE_DIR + '/supervisor.pid';
+      try {
+        const descriptor = openSync(pidFile, 'wx', 0o600);
+        writeFileSync(descriptor, process.pid + '\\n');
+        closeSync(descriptor);
+      } catch {
+        process.exit(17);
+      }
+      appendFileSync(process.env.FAKE_DRAWING_MARKER, 'spawn:drawing\\n');
+      let stopping = false;
+      const stop = () => {
+        if (stopping) return;
+        stopping = true;
+        try {
+          if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) unlinkSync(pidFile);
+        } catch {}
+        process.exit(0);
+      };
+      process.on('SIGINT', stop);
+      process.on('SIGTERM', stop);
+      setInterval(() => {}, 1000);
+    `);
+    const healthServer = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"ok":true}');
+    });
+    const healthBase = await listen(healthServer);
+    const script = resolve(import.meta.dirname, '../scripts/shared-8080.sh');
+    const env = {
+      ...process.env,
+      NODE_ENV: 'test',
+      SHARED_SUPERVISOR_ENTRY: entrypoint,
+      SHARED_STATE_DIR: stateDir,
+      SHARED_GATEWAY_READY_URL: `${healthBase}/ready`,
+      SHARED_POKER_READY_URL: `${healthBase}/poker/health`,
+      SHARED_START_TIMEOUT_SECONDS: '5',
+      SHARED_STOP_TIMEOUT_SECONDS: '5',
+      FAKE_DRAWING_MARKER: marker,
+    };
+
+    try {
+      const starts = await Promise.allSettled([
+        execFileAsync('bash', [script, 'start'], { env }),
+        execFileAsync('bash', [script, 'start'], { env }),
+      ]);
+      expect(starts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+      expect((await readFile(marker, 'utf8')).trim().split('\n')).toEqual(['spawn:drawing']);
+      const status = await execFileAsync('bash', [script, 'status'], { env });
+      expect(status.stdout).toMatch(/运行中/);
     } finally {
       await execFileAsync('bash', [script, 'stop'], { env }).catch(() => undefined);
       healthServer.close();
