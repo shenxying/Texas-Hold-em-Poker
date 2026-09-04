@@ -12,6 +12,11 @@ ops_state_dir="${ops_repository_root}/var/shared-8080"
 ops_drawing_repo='/home/sxy/.worktrees/drawing-api-annotator-proxy/drawing_api_961'
 ops_database='/root/workspace/12.autoresearch/drawing_api_961/var/drawing_api.sqlite3'
 ops_rollback_log="${ops_state_dir}/drawing-rollback.log"
+ops_node_executable="$(command -v node)"
+ops_tsx_preflight="${ops_repository_root}/node_modules/tsx/dist/preflight.cjs"
+ops_tsx_loader="${ops_repository_root}/node_modules/tsx/dist/loader.mjs"
+ops_tsx_loader_url="file://${ops_tsx_loader}"
+ops_supervisor_entry="${ops_repository_root}/src/gateway/supervisor.ts"
 ops_old_pattern='^/root/workspace/12.autoresearch/\.venv/bin/python -m drawing_api_961\.main --host 0\.0\.0\.0 --port 8080 --workers 1$'
 ops_shared_pattern='^/root/workspace/12.autoresearch/\.venv/bin/python -m drawing_api_961\.main --host 127\.0\.0\.1 --port 18080 --workers 1$'
 ops_any_drawing_pattern='^/root/workspace/12.autoresearch/\.venv/bin/python -m drawing_api_961\.main '
@@ -105,31 +110,40 @@ ops_verify_pid_identity() {
     ops_fail "${label} cmdline 不匹配"
 }
 
+ops_curl() {
+  curl --noproxy '*' --fail --silent --max-time 5 "$@"
+}
+
 ops_assert_live() {
   local url="$1"
   local label="$2"
-  curl --noproxy '*' --fail --silent "$url" >/dev/null || ops_fail "${label} live 检查失败"
+  ops_curl "$url" >/dev/null || ops_fail "${label} live 检查失败"
 }
 
 ops_assert_ready() {
   local url="$1"
   local label="$2"
   local body
-  if ! body="$(curl --noproxy '*' --fail --silent "$url")"; then
+  if ! body="$(ops_curl "$url")"; then
     ops_fail "${label} ready HTTP 检查失败"
     return
   fi
   if ! python3 -c '
 import json, sys
 value = json.load(sys.stdin)
-assert value.get("status") == "ready"
 components = value.get("components")
-assert isinstance(components, dict) and components
-assert all(
-    isinstance(component, dict)
-    and (not component.get("required") or component.get("ready") is True)
-    for component in components.values()
+valid = (
+    value.get("status") == "ready"
+    and isinstance(components, dict)
+    and bool(components)
+    and all(
+        isinstance(component, dict)
+        and (not component.get("required") or component.get("ready") is True)
+        for component in components.values()
+    )
 )
+if not valid:
+    sys.exit(1)
 ' <<< "$body"; then
     ops_fail "${label} ready JSON 检查失败"
   fi
@@ -138,14 +152,15 @@ assert all(
 ops_drawing_total() {
   local url="$1"
   local body
-  if ! body="$(curl --noproxy '*' --fail --silent "$url")"; then
+  if ! body="$(ops_curl "$url")"; then
     ops_fail 'Drawing total HTTP 检查失败'
     return
   fi
   python3 -c '
 import json, sys
 value = json.load(sys.stdin)["total"]
-assert isinstance(value, int) and not isinstance(value, bool) and value >= 0
+if not (isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+    sys.exit(1)
 print(value)
 ' <<< "$body" || ops_fail 'Drawing total JSON 检查失败'
 }
@@ -204,8 +219,15 @@ ops_direct_child_for() {
 
 ops_assert_exact_argv() {
   local pid="$1"
-  local expected="$2"
-  tr '\0' '\n' < "${ops_proc_root}/${pid}/cmdline" | grep -Fxq "$expected"
+  shift
+  local actual=()
+  mapfile -d '' -t actual < "${ops_proc_root}/${pid}/cmdline"
+  [[ "${#actual[@]}" -eq "$#" ]] || return 1
+  local index=0 expected
+  for expected in "$@"; do
+    [[ "${actual[index]}" == "$expected" ]] || return 1
+    ((index += 1))
+  done
 }
 
 ops_assert_listeners() {
@@ -238,10 +260,13 @@ ops_assert_listeners() {
   ops_verify_pid_identity "$drawing_pid" "$ops_drawing_repo" "$ops_expected_shared_cmdline" 'Drawing 18080 listener'
   [[ "$(readlink -f "${ops_proc_root}/${gateway_pid}/cwd")" == "$ops_repository_root" ]] || ops_fail 'gateway cwd 不匹配'
   [[ "$(readlink -f "${ops_proc_root}/${poker_pid}/cwd")" == "$ops_repository_root" ]] || ops_fail 'poker cwd 不匹配'
-  ops_assert_exact_argv "$gateway_pid" 'src/gateway/index.ts' || ops_fail 'gateway exact argv 不匹配'
-  ops_assert_exact_argv "$poker_pid" 'src/server/index.ts' || ops_fail 'poker exact argv 不匹配'
+  ops_assert_exact_argv "$gateway_pid" "$ops_node_executable" --require "$ops_tsx_preflight" --import "$ops_tsx_loader_url" 'src/gateway/index.ts' ||
+    ops_fail 'gateway exact argv 不匹配'
+  ops_assert_exact_argv "$poker_pid" "$ops_node_executable" --require "$ops_tsx_preflight" --import "$ops_tsx_loader_url" 'src/server/index.ts' ||
+    ops_fail 'poker exact argv 不匹配'
   [[ "$(readlink -f "${ops_proc_root}/${supervisor_pid}/cwd")" == "$ops_repository_root" ]] || ops_fail 'supervisor cwd 不匹配'
-  ops_assert_exact_argv "$supervisor_pid" 'src/gateway/supervisor.ts' || ops_fail 'supervisor exact argv 不匹配'
+  ops_assert_exact_argv "$supervisor_pid" "$ops_node_executable" --import "$ops_tsx_loader" "$ops_supervisor_entry" ||
+    ops_fail 'supervisor exact argv 不匹配'
 
   local drawing_child poker_child gateway_child
   drawing_child="$(ops_direct_child_for "$supervisor_pid" "$drawing_pid")" || ops_fail 'Drawing 不属于 supervisor'

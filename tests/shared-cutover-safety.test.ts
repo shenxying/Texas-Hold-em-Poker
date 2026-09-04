@@ -11,11 +11,17 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 
 const repositoryRoot = resolve('.');
 const cutoverScript = resolve('scripts/shared-8080-cutover.sh');
 const rollbackScript = resolve('scripts/shared-8080-rollback.sh');
+const nodeExecutable = process.execPath;
+const tsxPreflight = join(repositoryRoot, 'node_modules/tsx/dist/preflight.cjs');
+const tsxLoader = join(repositoryRoot, 'node_modules/tsx/dist/loader.mjs');
+const tsxLoaderUrl = pathToFileURL(tsxLoader).href;
+const supervisorEntry = join(repositoryRoot, 'src/gateway/supervisor.ts');
 const temporaryRoots: string[] = [];
 
 interface Fixture {
@@ -24,6 +30,7 @@ interface Fixture {
   actions(): string[];
   set(name: string, value: string): void;
   replaceCwd(pid: number, target: string): void;
+  replaceArgv(pid: number, args: string[]): void;
 }
 
 function executable(path: string, contents: string): void {
@@ -76,12 +83,31 @@ function fixture(): Fixture {
   writeFileSync(join(root, 'curl-mode'), 'ok\n');
 
   createProc(procRoot, 101, 1, drawingRepo, ['old-python', '--serve-old']);
-  createProc(procRoot, 200, 1, repositoryRoot, ['node', 'src/gateway/supervisor.ts'], [201, 202, 204]);
+  createProc(procRoot, 200, 1, repositoryRoot, [
+    nodeExecutable,
+    '--import',
+    tsxLoader,
+    supervisorEntry,
+  ], [201, 202, 204]);
   createProc(procRoot, 201, 200, drawingRepo, ['shared-python', '--serve-shared']);
   createProc(procRoot, 202, 200, repositoryRoot, ['node', 'poker-wrapper'], [203]);
-  createProc(procRoot, 203, 202, repositoryRoot, ['node', 'src/server/index.ts']);
+  createProc(procRoot, 203, 202, repositoryRoot, [
+    nodeExecutable,
+    '--require',
+    tsxPreflight,
+    '--import',
+    tsxLoaderUrl,
+    'src/server/index.ts',
+  ]);
   createProc(procRoot, 204, 200, repositoryRoot, ['node', 'gateway-wrapper'], [205]);
-  createProc(procRoot, 205, 204, repositoryRoot, ['node', 'src/gateway/index.ts']);
+  createProc(procRoot, 205, 204, repositoryRoot, [
+    nodeExecutable,
+    '--require',
+    tsxPreflight,
+    '--import',
+    tsxLoaderUrl,
+    'src/gateway/index.ts',
+  ]);
   createProc(procRoot, 301, 1, drawingRepo, ['old-python', '--serve-old']);
 
   writeFileSync(join(root, 'listeners'), [
@@ -110,6 +136,14 @@ exit 1
 set -u
 root="$SHARED_TEST_ROOT"
 url="\${*: -1}"
+printf 'curl %s\n' "$*" >> "$root/actions"
+if [[ "\${SHARED_TEST_REQUIRE_MAX_TIME:-}" == 1 &&
+      ( -f "$root/signaled" || -f "$root/rollback-started" ) ]]; then
+  case " $* " in
+    *' --max-time '*) ;;
+    *) exit 28 ;;
+  esac
+fi
 mode="$(<"$root/curl-mode")"
 if [[ "$mode" == live-fail && "$url" == */live ]]; then exit 22; fi
 if [[ "$mode" == ready-http-fail && "$url" == */ready ]]; then exit 22; fi
@@ -123,6 +157,9 @@ esac
   executable(join(bin, 'netstat'), `#!/usr/bin/env bash
 cat "$SHARED_TEST_ROOT/listeners"
 `);
+  executable(join(bin, 'sleep'), `#!/usr/bin/env bash
+exit 0
+`);
   executable(join(bin, 'npm'), `#!/usr/bin/env bash
 set -u
 root="$SHARED_TEST_ROOT"
@@ -133,6 +170,7 @@ case "$*" in
     printf '200\n' > "$SHARED_TEST_STATE_DIR/supervisor.pid"
     printf '201\n' > "$root/shared-pids"
     printf '201\n' > "$root/any-pids"
+    printf '0\n' > "$root/shared-status-rc"
     exit 0
     ;;
   'run shared -- stop')
@@ -143,6 +181,7 @@ case "$*" in
         : > "$root/any-pids"
       fi
       rm -f "$SHARED_TEST_STATE_DIR/supervisor.pid"
+      printf '1\n' > "$root/shared-status-rc"
     fi
     exit "$rc"
     ;;
@@ -160,12 +199,14 @@ exit "$rc"
 `);
   executable(join(bin, 'signal'), `#!/usr/bin/env bash
 printf 'signal %s\n' "$*" >> "$SHARED_TEST_ROOT/actions"
+: > "$SHARED_TEST_ROOT/signaled"
 : > "$SHARED_TEST_ROOT/old-pids"
 : > "$SHARED_TEST_ROOT/any-pids"
 sed -i 's/) S /) Z /' "$SHARED_TEST_PROC_ROOT/101/stat"
 `);
   executable(join(bin, 'original-start'), `#!/usr/bin/env bash
 printf 'original-start\n' >> "$SHARED_TEST_ROOT/actions"
+: > "$SHARED_TEST_ROOT/rollback-started"
 printf '301\n' > "$SHARED_TEST_ROOT/old-pids"
 printf '301\n' > "$SHARED_TEST_ROOT/any-pids"
 printf '301\n' > "$SHARED_TEST_STATE_DIR/drawing-rollback.pid"
@@ -200,6 +241,9 @@ printf '301\n' > "$SHARED_TEST_STATE_DIR/drawing-rollback.pid"
       unlinkSync(join(procRoot, String(pid), 'cwd'));
       symlinkSync(target, join(procRoot, String(pid), 'cwd'));
     },
+    replaceArgv(pid, args) {
+      writeFileSync(join(procRoot, String(pid), 'cmdline'), Buffer.from(`${args.join('\0')}\0`));
+    },
   };
 }
 
@@ -212,11 +256,10 @@ function run(script: string, environment: NodeJS.ProcessEnv, args: string[] = []
 }
 
 function expectNoDestructiveAction(subject: Fixture): void {
-  expect(subject.actions()).not.toEqual(expect.arrayContaining([
-    expect.stringMatching(/^signal /),
-    'npm run shared -- start',
-    'original-start',
-  ]));
+  const actions = subject.actions();
+  expect(actions.some((action) => /^signal /.test(action))).toBe(false);
+  expect(actions).not.toContain('npm run shared -- start');
+  expect(actions).not.toContain('original-start');
 }
 
 function expectRejectedAt(result: ReturnType<typeof run>, pattern: RegExp): void {
@@ -230,6 +273,79 @@ afterEach(() => {
 });
 
 describe('fail-closed shared cutover', () => {
+  it('accepts only the production-accurate complete supervisor, gateway, and Poker argv', () => {
+    const subject = fixture();
+    const result = run(cutoverScript, subject.env);
+    expect(result.status).toBe(0);
+  });
+
+  it.each([
+    {
+      pid: 200,
+      label: 'supervisor',
+      argv: [nodeExecutable, '--import', tsxLoader, supervisorEntry, '--extra'],
+    },
+    {
+      pid: 205,
+      label: 'gateway',
+      argv: [
+        nodeExecutable, '--require', tsxPreflight, '--import', tsxLoaderUrl,
+        'src/gateway/index.ts', '--extra',
+      ],
+    },
+    {
+      pid: 203,
+      label: 'poker',
+      argv: [
+        nodeExecutable, '--require', tsxPreflight, '--import', tsxLoaderUrl,
+        'src/server/index.ts', '--extra',
+      ],
+    },
+  ])('rejects extra argv for $label listener and rolls back', ({ pid, label, argv }) => {
+    const subject = fixture();
+    subject.replaceArgv(pid, argv);
+    const result = run(cutoverScript, subject.env);
+    expectRejectedAt(result, new RegExp(label, 'i'));
+    expect(subject.actions()).toEqual(expect.arrayContaining([
+      'signal -TERM 101',
+      'npm run shared -- start',
+      'npm run shared -- stop',
+      'original-start',
+    ]));
+  });
+
+  it('rejects invalid readiness even when Python assertions are optimized out', () => {
+    const subject = fixture();
+    subject.env.PYTHONOPTIMIZE = '1';
+    subject.set('ready.json', '{"status":"starting","components":{}}');
+    expectRejectedAt(run(cutoverScript, subject.env), /ready/i);
+    expectNoDestructiveAction(subject);
+  });
+
+  it('rejects an invalid Drawing total even when Python assertions are optimized out', () => {
+    const subject = fixture();
+    subject.env.PYTHONOPTIMIZE = '1';
+    subject.set('total.json', '{"total":"962"}');
+    expectRejectedAt(run(cutoverScript, subject.env), /total/i);
+    expectNoDestructiveAction(subject);
+  });
+
+  it('sets a maximum duration on every HTTP request after TERM, including Poker', () => {
+    const subject = fixture();
+    subject.env.SHARED_TEST_REQUIRE_MAX_TIME = '1';
+    const result = run(cutoverScript, subject.env);
+    expect(result.status).toBe(0);
+  });
+
+  it('sets a maximum duration on every rollback HTTP request', () => {
+    const subject = fixture();
+    subject.env.SHARED_TEST_REQUIRE_MAX_TIME = '1';
+    subject.set('old-pids', '');
+    subject.set('any-pids', '');
+    const result = run(rollbackScript, subject.env, ['962']);
+    expect(result.status).toBe(0);
+  });
+
   it('does not signal or start Drawing when the idle gate is active', () => {
     const subject = fixture();
     subject.set('idle-rc', '2');

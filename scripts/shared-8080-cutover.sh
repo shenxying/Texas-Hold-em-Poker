@@ -95,8 +95,8 @@ ops_assert_live 'http://127.0.0.1:8080/live' 'shared Drawing'
 ops_assert_ready 'http://127.0.0.1:8080/ready' 'shared Drawing'
 final_total="$(ops_drawing_total 'http://127.0.0.1:8080/api/v1/drawings?page=1&page_size=1')"
 [[ "$final_total" == "$baseline_total" ]] || ops_fail 'shared Drawing total 不匹配'
-curl --noproxy '*' --fail --silent http://127.0.0.1:8080/poker/ >/dev/null || ops_fail 'poker 页面检查失败'
-[[ "$(curl --noproxy '*' --fail --silent http://127.0.0.1:8080/poker/health)" == '{"ok":true}' ]] ||
+ops_curl http://127.0.0.1:8080/poker/ >/dev/null || ops_fail 'poker 页面检查失败'
+[[ "$(ops_curl http://127.0.0.1:8080/poker/health)" == '{"ok":true}' ]] ||
   ops_fail 'poker health 检查失败'
 ops_run_socket_smoke
 ops_assert_listeners "$supervisor_pid" "$drawing_pid"
