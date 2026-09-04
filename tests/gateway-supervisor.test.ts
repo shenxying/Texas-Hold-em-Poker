@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { access, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, link, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -109,6 +109,59 @@ afterEach(async () => {
 });
 
 describe('runSupervisor', () => {
+  it('excludes a contender while the owner pauses before publishing its PID file', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-publication-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const publicationEntered = deferred<void>();
+    const releasePublication = deferred<void>();
+    const readyGate = deferred<void>();
+    const firstEvents: string[] = [];
+    const secondEvents: string[] = [];
+
+    const first = runSupervisor(fixture(firstEvents, {
+      pidFile,
+      beforePidFilePublication: async () => {
+        publicationEntered.resolve(undefined);
+        await releasePublication.promise;
+      },
+      waitUntilReady: async () => readyGate.promise,
+    }));
+    await publicationEntered.promise;
+    const unpublishedContents = await readFile(pidFile, 'utf8').catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      },
+    );
+    expect(unpublishedContents).not.toBe(`${process.pid}\n`);
+
+    const second = runSupervisor(fixture(secondEvents, {
+      pidFile,
+      waitUntilReady: async () => readyGate.promise,
+    }));
+    const secondOutcome = second.then(
+      () => 'fulfilled' as const,
+      () => 'rejected' as const,
+    );
+    let observedSecondOutcome: Awaited<typeof secondOutcome> | undefined;
+    void secondOutcome.then((outcome) => {
+      observedSecondOutcome = outcome;
+    });
+
+    try {
+      await waitFor(() => observedSecondOutcome !== undefined ||
+        secondEvents.some((event) => event.startsWith('spawn:')));
+      expect(observedSecondOutcome).toBe('rejected');
+      expect(secondEvents.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+    } finally {
+      releasePublication.resolve(undefined);
+      readyGate.resolve(undefined);
+      await Promise.allSettled([first, second]);
+    }
+    expect(firstEvents.filter((event) => event.startsWith('spawn:'))).toHaveLength(3);
+  });
+
   it('atomically allows only one concurrent supervisor to spawn Drawing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-race-'));
     temporaryPaths.push(root);
@@ -447,7 +500,7 @@ describe('runSupervisor', () => {
     });
   });
 
-  it('safely recovers a stable malformed PID file and removes signal handlers', async () => {
+  it('rejects and preserves a malformed PID file without spawning children', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-invalid-pid-'));
     temporaryPaths.push(root);
     const pidFile = join(root, 'supervisor.pid');
@@ -455,15 +508,34 @@ describe('runSupervisor', () => {
     const signals = new EventEmitter();
     const events: string[] = [];
 
-    await runSupervisor(fixture(events, {
+    await expect(runSupervisor(fixture(events, {
       pidFile,
       signalSource: signals,
-    }));
+    }))).rejects.toThrow(/PID.*格式无效/i);
+
+    expect(events.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+    expect(await readFile(pidFile, 'utf8')).toBe('not-a-pid\n');
+    expect(signals.listenerCount('SIGINT')).toBe(0);
+    expect(signals.listenerCount('SIGTERM')).toBe(0);
+  });
+
+  it('reclaims a well-formed PID file only after its process has exited', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-stale-pid-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const formerOwner = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    if (formerOwner.pid === undefined) throw new Error('missing former owner PID');
+    await once(formerOwner, 'exit');
+    await writeFile(pidFile, `${formerOwner.pid}\n`);
+    const lockFile = `${pidFile}.lock`;
+    await link(pidFile, lockFile);
+    const events: string[] = [];
+
+    await runSupervisor(fixture(events, { pidFile }));
 
     expect(events.filter((event) => event.startsWith('spawn:'))).toHaveLength(3);
     await expect(access(pidFile)).rejects.toMatchObject({ code: 'ENOENT' });
-    expect(signals.listenerCount('SIGINT')).toBe(0);
-    expect(signals.listenerCount('SIGTERM')).toBe(0);
+    await expect(access(lockFile)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });
 

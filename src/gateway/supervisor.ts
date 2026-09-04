@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { link, lstat, mkdir, open, readFile, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -52,6 +53,7 @@ export interface SupervisorOptions {
   shutdownTimeoutMs?: number;
   killTimeoutMs?: number;
   stopAfterReady?: boolean;
+  beforePidFilePublication?: () => Promise<void>;
 }
 
 interface TrackedChild {
@@ -72,7 +74,10 @@ function processExists(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ESRCH') return false;
+    if (code === 'EPERM') return true;
+    throw error;
   }
 }
 
@@ -83,74 +88,206 @@ function parsePid(contents: string): number | undefined {
   return Number.isSafeInteger(pid) ? pid : undefined;
 }
 
-async function acquireOwnedPidFile(
-  pidFile: string,
-  clock: SupervisorClock,
+interface OwnerFileSnapshot {
+  contents: string;
+  dev: number;
+  ino: number;
+}
+
+async function observeOwnerFile(path: string): Promise<OwnerFileSnapshot | undefined> {
+  try {
+    const ownerStat = await lstat(path);
+    const contents = await readFile(path, 'utf8');
+    const confirmedStat = await lstat(path);
+    if (ownerStat.dev !== confirmedStat.dev || ownerStat.ino !== confirmedStat.ino) {
+      return undefined;
+    }
+    return { contents, dev: ownerStat.dev, ino: ownerStat.ino };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
+async function removeObservedOwnerFile(
+  path: string,
+  observed: OwnerFileSnapshot,
+): Promise<boolean> {
+  try {
+    const currentStat = await lstat(path);
+    const currentContents = await readFile(path, 'utf8');
+    if (currentStat.dev !== observed.dev || currentStat.ino !== observed.ino ||
+        currentContents !== observed.contents) return false;
+    await rm(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+async function reclaimValidatedDeadOwner(
+  path: string,
+  description: string,
+): Promise<boolean> {
+  const observed = await observeOwnerFile(path);
+  if (observed === undefined) return false;
+  requireValidatedDeadOwner(observed, path, description);
+  return removeObservedOwnerFile(path, observed);
+}
+
+function sameOwnerFile(left: OwnerFileSnapshot, right: OwnerFileSnapshot): boolean {
+  return left.dev === right.dev && left.ino === right.ino &&
+    left.contents === right.contents;
+}
+
+function requireValidatedDeadOwner(
+  observed: OwnerFileSnapshot,
+  path: string,
+  description: string,
+): void {
+  const existingPid = parsePid(observed.contents);
+  if (existingPid === undefined) {
+    throw new Error(`${description}格式无效：${path}`);
+  }
+  if (processExists(existingPid)) {
+    throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
+  }
+}
+
+async function finishFencedLockRecovery(
+  lockFile: string,
+  fenceFile: string,
+  fence: OwnerFileSnapshot,
 ): Promise<void> {
-  await mkdir(dirname(pidFile), { recursive: true });
+  const observedLock = await observeOwnerFile(lockFile);
+  if (observedLock !== undefined && sameOwnerFile(observedLock, fence)) {
+    await removeObservedOwnerFile(lockFile, observedLock);
+  }
+  await removeObservedOwnerFile(fenceFile, fence);
+}
+
+async function rejectExistingLockFence(fenceFile: string): Promise<void> {
+  const fence = await observeOwnerFile(fenceFile);
+  if (fence !== undefined) {
+    throw new Error(`PID 锁恢复尚未完成，拒绝自动覆盖：${fenceFile}`);
+  }
+}
+
+async function acquireOwnerLock(
+  candidateFile: string,
+  lockFile: string,
+  owner: OwnerFileSnapshot,
+): Promise<void> {
+  const fenceFile = `${lockFile}.reap`;
   for (;;) {
+    await rejectExistingLockFence(fenceFile);
+
     try {
-      const handle = await open(pidFile, 'wx', 0o600);
-      try {
-        await handle.writeFile(`${process.pid}\n`);
-        await handle.sync();
-      } finally {
-        await handle.close();
+      await link(candidateFile, lockFile);
+      const fence = await observeOwnerFile(fenceFile);
+      if (fence === undefined) return;
+      if (sameOwnerFile(fence, owner)) {
+        await removeObservedOwnerFile(fenceFile, fence);
+        return;
       }
-      return;
+      await removeOwnedOwnerFile(lockFile, owner);
+      throw new Error(`PID 锁恢复尚未完成，拒绝自动覆盖：${fenceFile}`);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
 
-    let observed: string;
-    let observedStat;
+    const observedLock = await observeOwnerFile(lockFile);
+    if (observedLock === undefined) continue;
+    requireValidatedDeadOwner(observedLock, lockFile, 'PID 锁文件');
+
     try {
-      [observed, observedStat] = await Promise.all([
-        readFile(pidFile, 'utf8'),
-        lstat(pidFile),
-      ]);
+      await link(lockFile, fenceFile);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') continue;
+      if (code === 'EEXIST') {
+        throw new Error(`PID 锁恢复尚未完成，拒绝自动覆盖：${fenceFile}`);
+      }
       throw error;
     }
-    let existingPid = parsePid(observed);
-    if (existingPid !== undefined && processExists(existingPid)) {
-      throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
-    }
 
-    if (existingPid === undefined) {
-      await clock.sleep(25);
-      try {
-        const settled = await readFile(pidFile, 'utf8');
-        if (settled !== observed) continue;
-        existingPid = parsePid(settled);
-        if (existingPid !== undefined && processExists(existingPid)) {
-          throw new Error(`共享服务监督器已在运行（PID ${existingPid}）`);
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw error;
-      }
-    }
-
+    const claimedFence = await observeOwnerFile(fenceFile);
+    if (claimedFence === undefined) continue;
     try {
-      const currentStat = await lstat(pidFile);
-      const current = await readFile(pidFile, 'utf8');
-      if (currentStat.dev !== observedStat.dev || currentStat.ino !== observedStat.ino ||
-          current !== observed) continue;
-      await rm(pidFile);
+      requireValidatedDeadOwner(claimedFence, fenceFile, 'PID 锁恢复文件');
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      await removeObservedOwnerFile(fenceFile, claimedFence);
+      throw error;
     }
+    await finishFencedLockRecovery(lockFile, fenceFile, claimedFence);
   }
 }
 
-async function removeOwnedPidFile(pidFile: string): Promise<void> {
+async function removeOwnedOwnerFile(
+  path: string,
+  owner: OwnerFileSnapshot,
+): Promise<void> {
+  const observed = await observeOwnerFile(path);
+  if (observed === undefined || observed.dev !== owner.dev || observed.ino !== owner.ino ||
+      observed.contents !== owner.contents) return;
+  await removeObservedOwnerFile(path, observed);
+}
+
+interface PidOwnership {
+  release(): Promise<void>;
+}
+
+async function acquireOwnedPidFile(
+  pidFile: string,
+  beforePidFilePublication: () => Promise<void>,
+): Promise<PidOwnership> {
+  await mkdir(dirname(pidFile), { recursive: true });
+  const lockFile = `${pidFile}.lock`;
+  const candidateFile = `${pidFile}.${process.pid}.${randomUUID()}.tmp`;
+  const contents = `${process.pid}\n`;
+  const handle = await open(candidateFile, 'wx', 0o600);
   try {
-    const contents = await readFile(pidFile, 'utf8');
-    if (contents.trim() === String(process.pid)) await rm(pidFile);
+    await handle.writeFile(contents);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const candidateStat = await lstat(candidateFile);
+  const owner = { contents, dev: candidateStat.dev, ino: candidateStat.ino };
+  let ownsLock = false;
+
+  try {
+    await acquireOwnerLock(candidateFile, lockFile, owner);
+    ownsLock = true;
+
+    await beforePidFilePublication();
+
+    for (;;) {
+      try {
+        await link(candidateFile, pidFile);
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      await reclaimValidatedDeadOwner(pidFile, 'PID 文件');
+    }
+
+    return {
+      async release() {
+        await removeOwnedOwnerFile(pidFile, owner);
+        await removeOwnedOwnerFile(lockFile, owner);
+      },
+    };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (ownsLock) await removeOwnedOwnerFile(lockFile, owner);
+    throw error;
+  } finally {
+    try {
+      await rm(candidateFile, { force: true });
+    } catch {
+      // A unique unpublished candidate cannot grant ownership; leave it for diagnosis.
+    }
   }
 }
 
@@ -342,10 +479,12 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
   signalSource.on('SIGINT', requestStop);
   signalSource.on('SIGTERM', requestStop);
 
-  let ownsPidFile = false;
+  let pidOwnership: PidOwnership | undefined;
   try {
-    await acquireOwnedPidFile(pidFile, clock);
-    ownsPidFile = true;
+    pidOwnership = await acquireOwnedPidFile(
+      pidFile,
+      options.beforePidFilePublication ?? (async () => undefined),
+    );
     for (const spec of specs) {
       if (stopping) break;
       log(`正在启动 ${spec.name}……`);
@@ -376,7 +515,7 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
     signalSource.off('SIGINT', requestStop);
     signalSource.off('SIGTERM', requestStop);
     await stopChildren(children, shutdownTimeoutMs, killTimeoutMs, clock, log);
-    if (ownsPidFile) await removeOwnedPidFile(pidFile);
+    await pidOwnership?.release();
   }
 }
 
