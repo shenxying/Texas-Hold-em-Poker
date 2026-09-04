@@ -108,11 +108,25 @@ function chatMessage(text: string, overrides: Partial<ChatMessage> = {}): ChatMe
   };
 }
 
+function cockpitProps(): {
+  inviteUrl: string;
+  leaving: boolean;
+  onLeave: () => Promise<void>;
+  onError: (message: string) => void;
+} {
+  return {
+    inviteUrl: 'http://host/poker/?room=ABCD23',
+    leaving: false,
+    onLeave: vi.fn().mockResolvedValue(undefined),
+    onError: vi.fn(),
+  };
+}
+
 afterEach(() => cleanup());
 
 describe('poker table privacy and presentation', () => {
   it('renders nine fixed seats, public table state, blind markers, and only the viewer hand face up', () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
+    render(<PokerRoom {...cockpitProps()} client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
 
     expect(screen.getAllByTestId(/^seat-\d$/)).toHaveLength(9);
     expect(screen.getByText('总底池 750')).toBeInTheDocument();
@@ -129,6 +143,13 @@ describe('poker table privacy and presentation', () => {
     expect(screen.getByLabelText('黑桃 K')).toBeInTheDocument();
     expect(screen.getByLabelText('方块 Q')).toBeInTheDocument();
     expect(screen.getAllByLabelText('底牌')).toHaveLength(4);
+    const dock = screen.getByRole('region', { name: '我的手牌和操作' });
+    expect(within(dock).getByLabelText('红桃 A')).toBeInTheDocument();
+    expect(within(dock).getByLabelText('黑桃 K')).toBeInTheDocument();
+    expect(screen.getAllByRole('img', { name: /红桃 A|黑桃 K/ })).toHaveLength(2);
+    expect(within(screen.getByTestId('seat-0')).queryByRole('img')).not.toBeInTheDocument();
+    expect(document.querySelector('.viewer-hand')).toBeNull();
+    expect(document.querySelector('.action-drawer')).toBeNull();
   });
 
   it('never places a face-down card rank or suit in DOM text or attributes', () => {
@@ -142,6 +163,7 @@ describe('poker table privacy and presentation', () => {
 
   it('derives blind markers from players actually dealt into the current hand', () => {
     render(<PokerRoom
+      {...cockpitProps()}
       client={new FakePokerClient()}
       view={viewWith({
         players: [
@@ -163,8 +185,20 @@ describe('poker table privacy and presentation', () => {
     expect(within(screen.getByTestId('seat-7')).getByText('大盲')).toBeInTheDocument();
   });
 
+  it('does not mark empty seats as the actor when no turn is active', () => {
+    render(<PokerRoom
+      {...cockpitProps()}
+      client={new FakePokerClient()}
+      view={viewWith({ phase: 'lobby', actorId: undefined, legalActions: undefined })}
+      playerId="me"
+      connected
+    />);
+
+    expect(document.querySelectorAll('.table-seat.current-actor')).toHaveLength(0);
+  });
+
   it('keeps an independent viewer hand and complete public seat summaries for compact layouts', () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+    render(<PokerRoom {...cockpitProps()} client={new FakePokerClient()} view={viewWith({
       players: [
         player({ connected: false, allIn: true }),
         player({ id: 'guest', nickname: '朋友', seatIndex: 3, isHost: false,
@@ -175,10 +209,10 @@ describe('poker table privacy and presentation', () => {
       ],
     })} playerId="me" connected />);
 
-    const viewerHand = screen.getByRole('region', { name: '移动端我的手牌' });
-    expect(viewerHand.closest('.table-seat')).toBeNull();
-    expect(within(viewerHand).getByLabelText('红桃 A')).toBeInTheDocument();
-    expect(within(viewerHand).getByLabelText('黑桃 K')).toBeInTheDocument();
+    const dock = screen.getByRole('region', { name: '我的手牌和操作' });
+    expect(dock.closest('.table-seat')).toBeNull();
+    expect(within(dock).getByLabelText('红桃 A')).toBeInTheDocument();
+    expect(within(dock).getByLabelText('黑桃 K')).toBeInTheDocument();
 
     const meSummary = screen.getByTestId('seat-summary-0');
     expect(within(meSummary).getByText('已断线')).toBeInTheDocument();
@@ -191,7 +225,7 @@ describe('poker table privacy and presentation', () => {
   });
 
   it('shows every server-authorized revealed hand and keeps absent hands face down', () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+    render(<PokerRoom {...cockpitProps()} client={new FakePokerClient()} view={viewWith({
       players: [
         player(),
         player({ id: 'revealed', nickname: '已摊牌', seatIndex: 3, isHost: false,
@@ -215,7 +249,7 @@ describe('poker table privacy and presentation', () => {
 describe('server-authoritative action controls', () => {
   it('renders only server-allowed actions and sends a clamped raise-to total', async () => {
     const client = new FakePokerClient();
-    render(<PokerRoom client={client} view={viewWith()} playerId="me" connected />);
+    render(<PokerRoom {...cockpitProps()} client={client} view={viewWith()} playerId="me" connected />);
 
     expect(screen.queryByRole('button', { name: '过牌' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^下注/ })).not.toBeInTheDocument();
@@ -302,6 +336,7 @@ describe('chat and responsive drawers', () => {
 
   it('announces system, connection, waiting, and automatic-action notices', () => {
     render(<PokerRoom
+      {...cockpitProps()}
       client={new FakePokerClient()}
       view={viewWith({
         waitingPosition: 2,
@@ -323,6 +358,7 @@ describe('chat and responsive drawers', () => {
     client.failure = new Error('消息发送太快，请稍后再试');
     const onError = vi.fn();
     render(<PokerRoom
+      {...cockpitProps()}
       client={client}
       view={viewWith()}
       playerId="me"
@@ -330,9 +366,13 @@ describe('chat and responsive drawers', () => {
       onError={onError}
     />);
 
+    await userEvent.click(screen.getByRole('button', { name: '聊天' }));
     await userEvent.type(screen.getByLabelText('聊天消息'), '请再试一次');
     await userEvent.click(screen.getByRole('button', { name: '发送' }));
     await waitFor(() => expect(onError).toHaveBeenCalledWith('消息发送太快，请稍后再试'));
+    expect(screen.getByLabelText('聊天消息')).toHaveValue('请再试一次');
+    await userEvent.click(screen.getByRole('button', { name: '关闭侧边栏' }));
+    await userEvent.click(screen.getByRole('button', { name: '聊天' }));
     expect(screen.getByLabelText('聊天消息')).toHaveValue('请再试一次');
   });
 
@@ -389,39 +429,50 @@ describe('chat and responsive drawers', () => {
     expect(list.scrollTop).toBe(500);
   });
 
-  it('toggles the mobile action and chat drawers without hiding accessible actions', async () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
+  it('opens the host side panel directly to chat or settings, switches tabs, and closes it', async () => {
+    render(<PokerRoom {...cockpitProps()} client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
+    const panel = screen.getByTestId('room-side-panel');
+    expect(panel).toHaveAttribute('hidden');
 
-    await userEvent.click(screen.getByRole('button', { name: '收起操作区' }));
-    expect(screen.getByRole('button', { name: '展开操作区' })).toHaveAttribute('aria-expanded', 'false');
-    await userEvent.click(screen.getByRole('button', { name: '展开操作区' }));
-    expect(screen.getByRole('button', { name: '弃牌' })).toBeInTheDocument();
+    const chatTrigger = screen.getByRole('button', { name: '聊天' });
+    await userEvent.click(chatTrigger);
+    expect(chatTrigger).toHaveAttribute('aria-expanded', 'true');
+    expect(panel).not.toHaveAttribute('hidden');
+    expect(screen.getByRole('tab', { name: '聊天' })).toHaveAttribute('aria-selected', 'true');
 
-    await userEvent.click(screen.getByRole('button', { name: '打开移动聊天' }));
-    expect(screen.getByRole('dialog', { name: '房间聊天' })).toBeInTheDocument();
-    const dialog = screen.getByRole('dialog', { name: '房间聊天' });
-    expect(within(dialog).getByRole('button', { name: '关闭聊天面板' })).toBeInTheDocument();
-    await userEvent.click(within(dialog).getByRole('button', { name: '关闭聊天面板' }));
-    expect(screen.queryByRole('dialog', { name: '房间聊天' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '房主设置' }));
+    expect(screen.getByRole('tab', { name: '房主设置' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByLabelText('初始筹码')).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('tab', { name: '聊天' }));
+    expect(screen.getByRole('tab', { name: '聊天' })).toHaveAttribute('aria-selected', 'true');
+    await userEvent.click(screen.getByRole('button', { name: '关闭侧边栏' }));
+    expect(panel).toHaveAttribute('hidden');
+    expect(chatTrigger).toHaveAttribute('aria-expanded', 'false');
+    expect(chatTrigger).toHaveFocus();
   });
 
-  it('lets desktop users collapse and restore the right-side chat', async () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith()} playerId="me" connected />);
-    const drawer = screen.getByTestId('chat-drawer');
-    expect(drawer.parentElement).toHaveClass('chat-column');
-    expect(within(drawer.parentElement!).getByRole('button', { name: '收起桌面聊天' }))
-      .toBeInTheDocument();
+  it('never exposes host settings to a guest', async () => {
+    render(<PokerRoom
+      {...cockpitProps()}
+      client={new FakePokerClient()}
+      view={viewWith({ players: viewWith().players.map((current) => (
+        current.id === 'me' ? { ...current, isHost: false } : current
+      )) })}
+      playerId="me"
+      connected
+    />);
 
-    await userEvent.click(screen.getByRole('button', { name: '收起桌面聊天' }));
-    expect(screen.getByRole('button', { name: '展开桌面聊天' })).toHaveAttribute('aria-expanded', 'false');
-    expect(drawer).toHaveClass('desktop-closed');
-    await userEvent.click(screen.getByRole('button', { name: '展开桌面聊天' }));
-    expect(drawer).not.toHaveClass('desktop-closed');
+    expect(screen.queryByRole('button', { name: '房主设置' })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '聊天' }));
+    expect(screen.queryByRole('tab', { name: '房主设置' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('初始筹码')).not.toBeInTheDocument();
   });
 
   it('lets the host start the first or next hand outside active play', async () => {
     const client = new FakePokerClient();
     render(<PokerRoom
+      {...cockpitProps()}
       client={client}
       view={viewWith({ phase: 'lobby', actorId: undefined, legalActions: undefined })}
       playerId="me"
@@ -433,7 +484,7 @@ describe('chat and responsive drawers', () => {
   });
 
   it('does not offer start when fewer than two seated players have chips', () => {
-    render(<PokerRoom client={new FakePokerClient()} view={viewWith({
+    render(<PokerRoom {...cockpitProps()} client={new FakePokerClient()} view={viewWith({
       phase: 'lobby',
       actorId: undefined,
       legalActions: undefined,

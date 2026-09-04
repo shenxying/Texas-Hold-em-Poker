@@ -67,7 +67,7 @@ export function ActionBar({
   const remaining = deadline === undefined ? undefined : Math.max(0, Math.ceil((deadline - now) / 1_000));
   const barDisabled = disabled || pending;
   return (
-    <fieldset className="action-bar" aria-label="玩家操作" disabled={barDisabled}>
+    <fieldset className="action-bar dock-action-bar" aria-label="玩家操作" disabled={barDisabled}>
       <legend>玩家操作</legend>
       {remaining !== undefined && <p className="action-countdown" aria-live="polite">剩余 {remaining} 秒</p>}
       <div className="action-buttons">

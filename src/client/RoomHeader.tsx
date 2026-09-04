@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { LeaveRoomDialog } from './LeaveRoomDialog';
+import type { RoomPanelTab } from './RoomSidePanel';
 
 interface RoomHeaderProps {
   roomCode: string;
@@ -7,6 +8,10 @@ interface RoomHeaderProps {
   connected: boolean;
   playing: boolean;
   leaving: boolean;
+  isHost: boolean;
+  openTab: RoomPanelTab | null;
+  panelAvailable?: boolean;
+  onOpenPanel: (tab: RoomPanelTab) => void;
   onLeave: () => Promise<void>;
 }
 
@@ -16,6 +21,10 @@ export function RoomHeader({
   connected,
   playing,
   leaving,
+  isHost,
+  openTab,
+  panelAvailable = true,
+  onOpenPanel,
   onLeave,
 }: RoomHeaderProps): React.JSX.Element {
   const leaveButton = useRef<HTMLButtonElement>(null);
@@ -66,6 +75,32 @@ export function RoomHeader({
           </button>
           <span className="copy-status" aria-live="polite">{copyStatus}</span>
         </div>
+        <nav className="room-tools" aria-label="房间工具">
+          <button
+            id="room-open-chat"
+            type="button"
+            className="secondary-button"
+            aria-controls="room-side-panel"
+            aria-expanded={openTab === 'chat'}
+            disabled={!panelAvailable}
+            onClick={() => onOpenPanel('chat')}
+          >
+            聊天
+          </button>
+          {isHost && (
+            <button
+              id="room-open-settings"
+              type="button"
+              className="secondary-button"
+              aria-controls="room-side-panel"
+              aria-expanded={openTab === 'settings'}
+              disabled={!panelAvailable}
+              onClick={() => onOpenPanel('settings')}
+            >
+              房主设置
+            </button>
+          )}
+        </nav>
         <button
           ref={leaveButton}
           type="button"

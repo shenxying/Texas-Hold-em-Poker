@@ -357,6 +357,22 @@ describe('confirmed room exit navigation', () => {
     await screen.findByRole('button', { name: '退出房间' });
   }
 
+  it('keeps an open confirmation mounted while the first table snapshot arrives', async () => {
+    const client = new FakePokerClient();
+    render(<App client={client} basePath="/poker" locationHref={window.location.href} />);
+    await userEvent.type(screen.getByLabelText('昵称'), '房主');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+
+    await userEvent.click(await screen.findByRole('button', { name: '退出房间' }));
+    const dialog = screen.getByRole('alertdialog', { name: '确认退出房间' });
+    expect(within(dialog).getByText('退出将立即弃牌并离开房间。')).toBeInTheDocument();
+
+    client.publish({ type: 'table:snapshot', view: tableView({ phase: 'playing' }) });
+
+    expect(screen.getByRole('alertdialog', { name: '确认退出房间' })).toBe(dialog);
+    expect(within(dialog).getByText('退出将立即弃牌并离开房间。')).toBeInTheDocument();
+  });
+
   it('requires confirmation, warns about an immediate fold, and restores focus on cancel', async () => {
     const client = new FakePokerClient();
     await enterRoom(client, tableView({ phase: 'playing' }));
@@ -481,7 +497,7 @@ describe('host room controls', () => {
     await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
     await screen.findByText('ABCD23');
     client.publish({ type: 'table:snapshot', view });
-    await screen.findByText('房主设置');
+    await userEvent.click(await screen.findByRole('button', { name: '房主设置' }));
   }
 
   it('shows editable settings, bot management, and busted-human reset only to the host', async () => {

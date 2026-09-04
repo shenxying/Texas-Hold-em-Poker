@@ -90,7 +90,7 @@ export function RoomControls({
   const bustedHumans = view.players.filter((player) => !player.isBot && player.stack === 0);
 
   return (
-    <section className="room-controls" aria-labelledby="room-controls-title">
+    <section className="room-controls side-panel-settings" aria-labelledby="room-controls-title">
       <h2 id="room-controls-title">房主设置</h2>
       <form onSubmit={saveSettings} noValidate>
         <label htmlFor="starting-stack">初始筹码</label>

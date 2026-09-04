@@ -52,7 +52,6 @@ export function PokerTable({ view, playerId }: PokerTableProps): React.JSX.Eleme
   const playersBySeat = new Map(view.players.map((player) => [player.seatIndex, player]));
   const blinds = blindSeats(view);
   const totalPot = view.pots.reduce((total, pot) => total + pot.amount, 0);
-  const viewer = view.players.find((player) => player.id === playerId);
 
   function markersFor(seatIndex: number): string[] {
     return [
@@ -97,7 +96,7 @@ export function PokerTable({ view, playerId }: PokerTableProps): React.JSX.Eleme
           const current = playersBySeat.get(seatIndex);
           return (
             <article
-              className={`table-seat seat-${seatIndex}${current?.id === view.actorId ? ' current-actor' : ''}${current?.folded ? ' folded' : ''}`}
+              className={`table-seat seat-${seatIndex}${current !== undefined && current.id === view.actorId ? ' current-actor' : ''}${current?.folded ? ' folded' : ''}`}
               data-testid={`seat-${seatIndex}`}
               key={seatIndex}
               aria-label={`${seatIndex + 1}号座位${current === undefined ? '，空座' : `，${current.nickname}`}`}
@@ -120,14 +119,6 @@ export function PokerTable({ view, playerId }: PokerTableProps): React.JSX.Eleme
           );
         })}
       </div>
-      {viewer?.holeCards !== undefined && (
-        <section className="viewer-hand" aria-label="移动端我的手牌">
-          <strong>我的手牌</strong>
-          <div className="hole-cards">
-            {viewer.holeCards.map((card, index) => <PlayingCard key={index} card={card} />)}
-          </div>
-        </section>
-      )}
     </section>
   );
 }

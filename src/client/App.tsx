@@ -3,8 +3,6 @@ import { normalizeBasePath } from '../shared/basePath';
 import type { SessionInfo, TableView } from '../shared/protocol';
 import { Lobby } from './Lobby';
 import { PokerRoom } from './PokerRoom';
-import { RoomControls } from './RoomControls';
-import { RoomHeader } from './RoomHeader';
 import type { ConnectionState, PokerClient } from './socket';
 
 const SESSION_KEY = 'lan-poker-session';
@@ -223,34 +221,17 @@ export function App({
                 <p className="connection-banner" aria-live="polite">{statusMessage}</p>
               )}
               {error !== '' && <p className="error-banner" aria-live="polite">{error}</p>}
-              <section className="room-summary" aria-label="私人房间">
-                <RoomHeader
-                  roomCode={session.roomCode}
-                  inviteUrl={inviteFor(locationHref, basePath, session.roomCode)}
-                  connected={connectionState === 'connected'}
-                  playing={view?.phase === 'playing'}
-                  leaving={leaving}
-                  onLeave={leaveRoom}
-                />
-                {view !== undefined && (
-                  <>
-                    <PokerRoom
-                      client={client}
-                      view={view}
-                      playerId={session.playerId}
-                      connected={connectionState === 'connected'}
-                      onError={setError}
-                    />
-                    <RoomControls
-                      client={client}
-                      view={view}
-                      playerId={session.playerId}
-                      connected={connectionState === 'connected'}
-                      onError={setError}
-                    />
-                  </>
-                )}
-              </section>
+              <PokerRoom
+                client={client}
+                view={view}
+                roomCode={session.roomCode}
+                playerId={session.playerId}
+                inviteUrl={inviteFor(locationHref, basePath, session.roomCode)}
+                connected={connectionState === 'connected'}
+                leaving={leaving}
+                onLeave={leaveRoom}
+                onError={setError}
+              />
             </>
           )}
         </>

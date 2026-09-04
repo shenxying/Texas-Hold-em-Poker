@@ -284,6 +284,7 @@ describe('SocketPokerClient transport lifecycle', () => {
     socket.respond(0, { ok: true, data: session });
     expect(await screen.findByText('ABCD23')).toBeInTheDocument();
     socket.serverEvent('table:snapshot', hostSnapshot);
+    await userEvent.click(await screen.findByRole('button', { name: '房主设置' }));
     expect(await screen.findByRole('button', { name: '保存设置' })).toBeEnabled();
 
     socket.disconnect();
