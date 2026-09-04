@@ -297,15 +297,18 @@ export class RoomService {
 
   expireDisconnected(now: number): RoomEvent[] {
     const events: RoomEvent[] = [];
-    for (const [sessionToken, { room, player }] of [...this.sessions]) {
-      if (
-        player.connected ||
-        player.disconnectedAt === undefined ||
-        now - player.disconnectedAt < 300_000
-      ) {
-        continue;
-      }
-      events.push(...this.removeHuman(sessionToken, room, player, now));
+    const expired = [...this.sessions].filter(([, { player }]) =>
+      !player.connected &&
+      player.disconnectedAt !== undefined &&
+      now - player.disconnectedAt >= 300_000,
+    );
+    const affectedRooms = new Set<Room>();
+    for (const [sessionToken, { room, player }] of expired) {
+      events.push(...this.removeHumanMembership(sessionToken, room, player, now));
+      affectedRooms.add(room);
+    }
+    for (const room of affectedRooms) {
+      events.push(...this.finalizeHumanRemoval(room, now));
     }
     return events;
   }
@@ -431,6 +434,16 @@ export class RoomService {
     player: RoomPlayer,
     now: number,
   ): RoomEvent[] {
+    const events = this.removeHumanMembership(sessionToken, room, player, now);
+    return [...events, ...this.finalizeHumanRemoval(room, now)];
+  }
+
+  private removeHumanMembership(
+    sessionToken: string,
+    room: Room,
+    player: RoomPlayer,
+    now: number,
+  ): RoomEvent[] {
     this.sessions.delete(sessionToken);
     const seatIndex = room.seats.indexOf(player);
     if (seatIndex !== -1) room.seats[seatIndex] = null;
@@ -440,17 +453,18 @@ export class RoomService {
 
     const events: RoomEvent[] = [{ type: 'player-left', roomCode: room.code, playerId: player.id }];
     this.appendSystemEvent(room, { type: 'player-left', nickname: player.nickname }, now);
+    return events;
+  }
 
+  private finalizeHumanRemoval(room: Room, now: number): RoomEvent[] {
     if (allHumans(room).length === 0) {
       this.rooms.delete(room.code);
       this.chat.clear(room.code);
-      events.push({ type: 'room-destroyed', roomCode: room.code });
-      return events;
+      return [{ type: 'room-destroyed', roomCode: room.code }];
     }
 
-    if (room.phase !== 'playing') events.push(...this.promoteWaiting(room, now));
-    else events.push(...this.transferHost(room, now));
-    return events;
+    if (room.phase !== 'playing') return this.promoteWaiting(room, now);
+    return this.transferHost(room, now);
   }
 
   private transferHost(room: Room, now: number): RoomEvent[] {

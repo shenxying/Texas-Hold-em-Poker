@@ -214,6 +214,32 @@ describe('room service and views', () => {
     });
   });
 
+  it('does not promote expired waiters or remove bots during one expiry sweep', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    const seatedGuests = Array.from({ length: 6 }, (_, index) =>
+      rooms.joinRoom({ roomCode: host.roomCode, nickname: `玩家${index + 1}` }),
+    );
+    rooms.addBot(host.sessionToken, 'tight');
+    rooms.addBot(host.sessionToken, 'aggressive');
+    const firstWaiter = rooms.joinRoom({ roomCode: host.roomCode, nickname: '等待甲' });
+    const secondWaiter = rooms.joinRoom({ roomCode: host.roomCode, nickname: '等待乙' });
+    const room = rooms.getRoom(host.roomCode)!;
+    const botIds = room.seats.filter((player) => player?.isBot).map((player) => player!.id);
+
+    rooms.disconnect(seatedGuests[0]!.sessionToken, 0);
+    rooms.disconnect(firstWaiter.sessionToken, 0);
+    rooms.disconnect(secondWaiter.sessionToken, 0);
+    const events = rooms.expireDisconnected(300_000);
+
+    expect(room.waiting).toEqual([]);
+    expect(room.seats.some((player) => player?.id === firstWaiter.playerId)).toBe(false);
+    expect(room.seats.some((player) => player?.id === secondWaiter.playerId)).toBe(false);
+    expect(room.seats.filter((player) => player?.isBot).map((player) => player!.id)).toEqual(botIds);
+    expect(events.filter((event) => event.type === 'player-seated')).toEqual([]);
+    expect(events.filter((event) => event.type === 'bot-removed')).toEqual([]);
+  });
+
   it('destroys rooms after their last human expires even when bots remain', () => {
     const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
     const host = rooms.createRoom({ nickname: '房主' });
