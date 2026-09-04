@@ -258,20 +258,40 @@ export function advanceAutomatic(input: HandState): HandTransition {
   return { state, events };
 }
 
+function finishPlayerAction(
+  state: HandState,
+  playerIndex: number,
+  events: GameEvent[],
+  wasActor: boolean,
+): HandTransition {
+  if (nonFoldedPlayers(state).length <= 1 || roundClosed(state)) {
+    state.actorId = null;
+  } else if (wasActor) {
+    const next = findNextActorIndex(state, nextIndex(state.players, playerIndex));
+    state.actorId = next === null ? null : state.players[next]!.id;
+  }
+  const automatic = advanceAutomatic(state);
+  return { state: automatic.state, events: [...events, ...automatic.events] };
+}
+
+export function forceFold(input: HandState, playerId: string): HandTransition {
+  const state = cloneState(input);
+  const playerIndex = state.players.findIndex((player) => player.id === playerId);
+  if (playerIndex === -1) throw new GameRuleError('UNKNOWN_PLAYER', 'Player does not exist');
+  if (state.street === 'complete') throw new GameRuleError('HAND_NOT_ACTIVE', 'The hand is not active');
+  const player = state.players[playerIndex]!;
+  if (player.folded) return { state, events: [] };
+  player.folded = true;
+  player.lastAction = 'fold';
+  player.actedSinceFullRaise = true;
+  return finishPlayerAction(state, playerIndex, [{ type: 'player-acted', action: { playerId, type: 'fold' } }], input.actorId === playerId);
+}
+
+
 export function applyAction(input: HandState, action: PlayerAction): HandTransition {
   const state = cloneState(input);
   const currentActorIndex = actorIndex(state);
   applyBettingAction(state, action);
   const events: GameEvent[] = [{ type: 'player-acted', action: { ...action } }];
-
-  if (nonFoldedPlayers(state).length > 1 && !roundClosed(state)) {
-    const start = currentActorIndex === null ? 0 : nextIndex(state.players, currentActorIndex);
-    const nextActor = findNextActorIndex(state, start);
-    state.actorId = nextActor === null ? null : state.players[nextActor]!.id;
-  } else {
-    state.actorId = null;
-  }
-
-  const automatic = advanceAutomatic(state);
-  return { state: automatic.state, events: [...events, ...automatic.events] };
+  return finishPlayerAction(state, currentActorIndex === null ? 0 : currentActorIndex, events, input.actorId === action.playerId);
 }

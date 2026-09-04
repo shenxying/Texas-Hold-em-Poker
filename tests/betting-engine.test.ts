@@ -3,6 +3,7 @@ import {
   advanceAutomatic,
   applyAction,
   createHand,
+  forceFold,
   getLegalActions,
 } from '../src/game/engine';
 import type { HandPlayer, HandState } from '../src/game/types';
@@ -487,6 +488,7 @@ describe('betting engine', () => {
     expect(transition.state.players[0]!.holeCards[0]).not.toBe(state.players[0]!.holeCards[0]);
   });
 
+
   it('does not choose a player action during automatic progression', () => {
     const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
     const transition = advanceAutomatic(state);
@@ -494,5 +496,50 @@ describe('betting engine', () => {
     expect(transition.events).toEqual([]);
     expect(transition.state).toEqual(state);
     expect(transition.state).not.toBe(state);
+  });
+
+  it('force-folds a non-actor without changing the current actor', () => {
+    const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    const leaving = state.players.find((player) => player.id !== state.actorId)!.id;
+    const transition = forceFold(state, leaving);
+    expect(transition.state.players.find((player) => player.id === leaving)).toMatchObject({ folded: true, lastAction: 'fold' });
+    expect(transition.state.actorId).toBe(state.actorId);
+    expect(state.players.find((player) => player.id === leaving)!.folded).toBe(false);
+  });
+
+  it('force-folds the actor and advances to the next eligible player', () => {
+    const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    const transition = forceFold(state, state.actorId!);
+    expect(transition.state.actorId).not.toBe(state.actorId);
+    expect(transition.events).toContainEqual({ type: 'player-acted', action: { playerId: state.actorId, type: 'fold' } });
+  });
+
+  it('awards an uncontested pot when a forced fold leaves one player', () => {
+    const state = createHand({ seats: seats.slice(0, 2), dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    const transition = forceFold(state, state.actorId!);
+    expect(transition.state.street).toBe('complete');
+    expect(transition.state.actorId).toBeNull();
+    expect(transition.events).toContainEqual({ type: 'uncontested-awarded', playerId: 'p2', amount: 150 });
+  });
+
+  it('rejects an unknown forced-fold player', () => {
+    const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    expectErrorCode(() => forceFold(state, 'missing'), 'UNKNOWN_PLAYER');
+  });
+
+  it('makes forced folding of an already-folded player idempotent', () => {
+    const state = createHand({ seats, dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    const folded = forceFold(state, 'p2').state;
+    const transition = forceFold(folded, 'p2');
+    expect(transition.events).toEqual([]);
+    expect(transition.state).toEqual(folded);
+  });
+
+  it('allows an all-in player to forfeit the hand on forced fold', () => {
+    const state = createHand({ seats: [{ id: 'p1', stack: 50 }, { id: 'p2', stack: 30 }, { id: 'p3', stack: 10_000 }], dealerIndex: 0, smallBlind: 50, bigBlind: 100 });
+    const transition = forceFold(state, 'p2');
+    expect(transition.state.players.find((player) => player.id === 'p2')).toMatchObject({ folded: true, allIn: true });
+    expect(transition.state.actorId).toBe('p1');
+    expect(transition.state.street).toBe('preflop');
   });
 });
