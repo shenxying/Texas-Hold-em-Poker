@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter, once } from 'node:events';
-import { access, link, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { access, link, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -76,10 +76,24 @@ function fixture(
 async function processExists(pid: number): Promise<boolean> {
   try {
     process.kill(pid, 0);
+    try {
+      const processStat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      if (processStat.slice(processStat.lastIndexOf(') ') + 2).startsWith('Z ')) return false;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+      throw error;
+    }
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
+}
+
+async function exitedProcessPid(): Promise<number> {
+  const formerOwner = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  if (formerOwner.pid === undefined) throw new Error('missing former owner PID');
+  await once(formerOwner, 'exit');
+  return formerOwner.pid;
 }
 
 async function waitFor(
@@ -519,14 +533,116 @@ describe('runSupervisor', () => {
     expect(signals.listenerCount('SIGTERM')).toBe(0);
   });
 
+  it.each([
+    { crashStep: 'fence-created', oldLockRemains: true },
+    { crashStep: 'old-lock-removed', oldLockRemains: false },
+    { crashStep: 'before-fence-removal', oldLockRemains: false },
+  ] as const)(
+    'resumes validated lock recovery after a $crashStep crash',
+    async ({ crashStep, oldLockRemains }) => {
+      const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-reap-resume-'));
+      temporaryPaths.push(root);
+      const pidFile = join(root, 'supervisor.pid');
+      const lockFile = `${pidFile}.lock`;
+      const fenceFile = `${lockFile}.reap`;
+      const deadPid = await exitedProcessPid();
+      await writeFile(pidFile, `${deadPid}\n`);
+      await link(pidFile, lockFile);
+      const interruptedEvents: string[] = [];
+
+      await expect(runSupervisor(fixture(interruptedEvents, {
+        pidFile,
+        async onPidLockRecoveryStep(step) {
+          if (step === crashStep) throw new Error(`simulated crash at ${step}`);
+        },
+      }))).rejects.toThrow(`simulated crash at ${crashStep}`);
+
+      expect(interruptedEvents.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+      expect(await readFile(fenceFile, 'utf8')).toBe(`${deadPid}\n`);
+      if (oldLockRemains) {
+        expect(await readFile(lockFile, 'utf8')).toBe(`${deadPid}\n`);
+      } else {
+        await expect(access(lockFile)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+
+      const recoveredEvents: string[] = [];
+      const recoveryLogs: string[] = [];
+      await runSupervisor(fixture(recoveredEvents, {
+        pidFile,
+        log(message) {
+          recoveryLogs.push(message);
+        },
+      }));
+
+      expect(recoveredEvents.filter((event) => event.startsWith('spawn:'))).toHaveLength(3);
+      expect(recoveryLogs).toEqual(expect.arrayContaining([
+        expect.stringMatching(/中断.*PID 锁恢复.*续作/),
+        expect.stringMatching(/PID 锁恢复已完成/),
+      ]));
+      await expect(access(pidFile)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(lockFile)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(fenceFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    },
+  );
+
+  it('preserves a malformed recovery fence without spawning children', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-reap-malformed-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const fenceFile = `${pidFile}.lock.reap`;
+    await writeFile(fenceFile, 'not-a-pid\n');
+    const events: string[] = [];
+
+    await expect(runSupervisor(fixture(events, { pidFile }))).rejects.toThrow(
+      /PID 锁恢复文件格式无效/,
+    );
+
+    expect(events.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+    expect(await readFile(fenceFile, 'utf8')).toBe('not-a-pid\n');
+  });
+
+  it('preserves mismatched lock and recovery-fence identities', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-reap-mismatch-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const lockFile = `${pidFile}.lock`;
+    const fenceFile = `${lockFile}.reap`;
+    const deadPid = await exitedProcessPid();
+    await writeFile(lockFile, `${deadPid}\n`);
+    await writeFile(fenceFile, `${deadPid}\n`);
+    const events: string[] = [];
+
+    await expect(runSupervisor(fixture(events, { pidFile }))).rejects.toThrow(
+      /identity 不匹配/,
+    );
+
+    expect(events.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+    expect(await readFile(lockFile, 'utf8')).toBe(`${deadPid}\n`);
+    expect(await readFile(fenceFile, 'utf8')).toBe(`${deadPid}\n`);
+  });
+
+  it('preserves a recovery fence whose owner may still be live', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-reap-live-'));
+    temporaryPaths.push(root);
+    const pidFile = join(root, 'supervisor.pid');
+    const fenceFile = `${pidFile}.lock.reap`;
+    await writeFile(fenceFile, `${process.pid}\n`);
+    const events: string[] = [];
+
+    await expect(runSupervisor(fixture(events, { pidFile }))).rejects.toThrow(
+      new RegExp(`已在运行.*${process.pid}`),
+    );
+
+    expect(events.filter((event) => event.startsWith('spawn:'))).toEqual([]);
+    expect(await readFile(fenceFile, 'utf8')).toBe(`${process.pid}\n`);
+  });
+
   it('reclaims a well-formed PID file only after its process has exited', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-supervisor-stale-pid-'));
     temporaryPaths.push(root);
     const pidFile = join(root, 'supervisor.pid');
-    const formerOwner = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    if (formerOwner.pid === undefined) throw new Error('missing former owner PID');
-    await once(formerOwner, 'exit');
-    await writeFile(pidFile, `${formerOwner.pid}\n`);
+    const deadPid = await exitedProcessPid();
+    await writeFile(pidFile, `${deadPid}\n`);
     const lockFile = `${pidFile}.lock`;
     await link(pidFile, lockFile);
     const events: string[] = [];
@@ -693,11 +809,118 @@ describe('shared-8080.sh', () => {
     }
   }, 15_000);
 
+  it('does not delete or signal a new owner published after a stale stop check', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'shared-8080-stale-stop-race-'));
+    temporaryPaths.push(root);
+    const stateDir = join(root, 'state');
+    const pidFile = join(stateDir, 'supervisor.pid');
+    const lockFile = `${pidFile}.lock`;
+    const entrypoint = join(root, 'fake-new-supervisor.mjs');
+    const newPidFile = join(root, 'new-supervisor.pid');
+    const signalMarker = join(root, 'signals.log');
+    const barrier = join(root, 'stale-stop');
+    await mkdir(stateDir);
+    await writeFile(pidFile, `${await exitedProcessPid()}\n`);
+    await writeFile(entrypoint, `
+      import {
+        appendFileSync, closeSync, fsyncSync, linkSync, openSync, readFileSync, rmSync,
+        writeFileSync,
+      } from 'node:fs';
+      const pidFile = process.env.SHARED_STATE_DIR + '/supervisor.pid';
+      const lockFile = pidFile + '.lock';
+      const candidate = pidFile + '.' + process.pid + '.tmp';
+      rmSync(pidFile, { force: true });
+      const descriptor = openSync(candidate, 'wx', 0o600);
+      writeFileSync(descriptor, process.pid + '\\n');
+      fsyncSync(descriptor);
+      closeSync(descriptor);
+      linkSync(candidate, lockFile);
+      linkSync(candidate, pidFile);
+      rmSync(candidate);
+      writeFileSync(process.env.FAKE_NEW_PID_FILE, process.pid + '\\n');
+      let stopping = false;
+      const stop = (signal) => {
+        if (stopping) return;
+        stopping = true;
+        appendFileSync(process.env.FAKE_SIGNAL_MARKER, signal + '\\n');
+        try {
+          if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) rmSync(pidFile);
+        } catch {}
+        try {
+          if (readFileSync(lockFile, 'utf8').trim() === String(process.pid)) rmSync(lockFile);
+        } catch {}
+        process.exit(0);
+      };
+      process.on('SIGINT', () => stop('SIGINT'));
+      process.on('SIGTERM', () => stop('SIGTERM'));
+      setInterval(() => {}, 1000);
+    `);
+    const healthServer = createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"ok":true}');
+    });
+    const healthBase = await listen(healthServer);
+    const script = resolve(import.meta.dirname, '../scripts/shared-8080.sh');
+    const env = {
+      ...process.env,
+      NODE_ENV: 'test',
+      SHARED_SUPERVISOR_ENTRY: entrypoint,
+      SHARED_STATE_DIR: stateDir,
+      SHARED_GATEWAY_READY_URL: `${healthBase}/ready`,
+      SHARED_POKER_READY_URL: `${healthBase}/poker/health`,
+      SHARED_START_TIMEOUT_SECONDS: '5',
+      SHARED_STOP_TIMEOUT_SECONDS: '5',
+      SHARED_TEST_STALE_STOP_BARRIER: barrier,
+      FAKE_NEW_PID_FILE: newPidFile,
+      FAKE_SIGNAL_MARKER: signalMarker,
+    };
+    let newPid: number | undefined;
+    const staleStop = execFileAsync('bash', [script, 'stop'], { env });
+
+    try {
+      await waitFor(async () => {
+        try {
+          await access(`${barrier}.entered`);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      await execFileAsync('bash', [script, 'start'], { env });
+      newPid = Number((await readFile(newPidFile, 'utf8')).trim());
+      expect(await readFile(pidFile, 'utf8')).toBe(`${newPid}\n`);
+      expect(await readFile(lockFile, 'utf8')).toBe(`${newPid}\n`);
+
+      await writeFile(`${barrier}.release`, 'release\n');
+      await staleStop;
+
+      expect(await readFile(pidFile, 'utf8')).toBe(`${newPid}\n`);
+      expect(await readFile(lockFile, 'utf8')).toBe(`${newPid}\n`);
+      await expect(access(signalMarker)).rejects.toMatchObject({ code: 'ENOENT' });
+      const status = await execFileAsync('bash', [script, 'status'], { env });
+      expect(status.stdout).toMatch(/运行中/);
+
+      await execFileAsync('bash', [script, 'stop'], { env });
+      expect(await readFile(signalMarker, 'utf8')).toBe('SIGTERM\n');
+      await expect(access(pidFile)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(access(lockFile)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await writeFile(`${barrier}.release`, 'release\n');
+      await staleStop.catch(() => undefined);
+      if (newPid !== undefined && await processExists(newPid)) {
+        process.kill(newPid, 'SIGTERM');
+        await waitFor(async () => !await processExists(newPid!));
+      }
+      healthServer.close();
+      await once(healthServer, 'close');
+    }
+  }, 15_000);
+
   it('refuses to signal a live unrelated PID from the state file', async () => {
     const root = await mkdtemp(join(tmpdir(), 'shared-8080-unrelated-'));
     temporaryPaths.push(root);
     const stateDir = join(root, 'state');
-    await import('node:fs/promises').then(({ mkdir }) => mkdir(stateDir));
+    await mkdir(stateDir);
     await writeFile(join(stateDir, 'supervisor.pid'), `${process.pid}\n`);
     const entrypoint = join(root, 'not-this-process.mjs');
     await writeFile(entrypoint, 'setInterval(() => {}, 1000);\n');

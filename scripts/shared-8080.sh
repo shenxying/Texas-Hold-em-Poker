@@ -10,6 +10,7 @@ gateway_ready_url="http://127.0.0.1:8080/ready"
 poker_ready_url="http://127.0.0.1:8080/poker/health"
 start_timeout_seconds=60
 stop_timeout_seconds=40
+stale_stop_barrier=""
 runner=("${repository_root}/node_modules/.bin/tsx")
 
 if [[ -n "${SHARED_SUPERVISOR_ENTRY:-}" && "${NODE_ENV:-}" != "test" ]]; then
@@ -24,6 +25,7 @@ if [[ "${NODE_ENV:-}" == "test" ]]; then
   poker_ready_url="${SHARED_POKER_READY_URL:-${poker_ready_url}}"
   start_timeout_seconds="${SHARED_START_TIMEOUT_SECONDS:-${start_timeout_seconds}}"
   stop_timeout_seconds="${SHARED_STOP_TIMEOUT_SECONDS:-${stop_timeout_seconds}}"
+  stale_stop_barrier="${SHARED_TEST_STALE_STOP_BARRIER:-}"
   if [[ "${supervisor_entry}" != "${default_entry}" ]]; then
     runner=("$(command -v node)")
   fi
@@ -75,6 +77,19 @@ wait_until_gone() {
   while pid_is_alive "${pid}"; do
     (( SECONDS >= deadline )) && return 1
     sleep 0.1
+  done
+}
+
+wait_at_stale_stop_barrier() {
+  [[ -n "${stale_stop_barrier}" ]] || return 0
+  : > "${stale_stop_barrier}.entered"
+  local deadline=$((SECONDS + start_timeout_seconds))
+  while [[ ! -f "${stale_stop_barrier}.release" ]]; do
+    (( SECONDS < deadline )) || {
+      echo "测试 stale-stop barrier 超时：${stale_stop_barrier}" >&2
+      return 1
+    }
+    sleep 0.01
   done
 }
 
@@ -182,8 +197,8 @@ stop_services() {
   local supervisor_pid
   supervisor_pid="$(read_supervisor_pid)" || return $?
   if ! pid_is_alive "${supervisor_pid}"; then
-    rm -f -- "${pid_file}"
-    echo "共享 8080 服务未运行；已移除陈旧 PID 文件"
+    wait_at_stale_stop_barrier
+    echo "共享 8080 服务未运行（陈旧 PID ${supervisor_pid}）；保留状态供 supervisor 安全回收"
     return 0
   fi
   if ! pid_is_owned "${supervisor_pid}"; then

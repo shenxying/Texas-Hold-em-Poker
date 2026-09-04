@@ -54,7 +54,13 @@ export interface SupervisorOptions {
   killTimeoutMs?: number;
   stopAfterReady?: boolean;
   beforePidFilePublication?: () => Promise<void>;
+  onPidLockRecoveryStep?: (step: PidLockRecoveryStep) => Promise<void>;
 }
+
+export type PidLockRecoveryStep =
+  | 'fence-created'
+  | 'old-lock-removed'
+  | 'before-fence-removal';
 
 interface TrackedChild {
   spec: ChildSpec;
@@ -159,29 +165,49 @@ async function finishFencedLockRecovery(
   lockFile: string,
   fenceFile: string,
   fence: OwnerFileSnapshot,
+  onRecoveryStep: (step: PidLockRecoveryStep) => Promise<void>,
 ): Promise<void> {
   const observedLock = await observeOwnerFile(lockFile);
-  if (observedLock !== undefined && sameOwnerFile(observedLock, fence)) {
-    await removeObservedOwnerFile(lockFile, observedLock);
+  if (observedLock !== undefined && !sameOwnerFile(observedLock, fence)) {
+    throw new Error(
+      `PID 锁与恢复文件 identity 不匹配，拒绝自动覆盖：${lockFile} / ${fenceFile}`,
+    );
+  }
+  if (observedLock !== undefined && await removeObservedOwnerFile(lockFile, observedLock)) {
+    await onRecoveryStep('old-lock-removed');
+  }
+  await onRecoveryStep('before-fence-removal');
+  if (await observeOwnerFile(lockFile) !== undefined) {
+    throw new Error(`PID 锁在恢复期间重新出现，拒绝删除恢复文件：${lockFile}`);
   }
   await removeObservedOwnerFile(fenceFile, fence);
 }
 
-async function rejectExistingLockFence(fenceFile: string): Promise<void> {
+async function recoverExistingLockFence(
+  lockFile: string,
+  fenceFile: string,
+  onRecoveryStep: (step: PidLockRecoveryStep) => Promise<void>,
+  log: (message: string) => void,
+): Promise<boolean> {
   const fence = await observeOwnerFile(fenceFile);
-  if (fence !== undefined) {
-    throw new Error(`PID 锁恢复尚未完成，拒绝自动覆盖：${fenceFile}`);
-  }
+  if (fence === undefined) return false;
+  requireValidatedDeadOwner(fence, fenceFile, 'PID 锁恢复文件');
+  log(`检测到中断的 PID 锁恢复，正在续作（${fenceFile}）`);
+  await finishFencedLockRecovery(lockFile, fenceFile, fence, onRecoveryStep);
+  log(`PID 锁恢复已完成（${fenceFile}）`);
+  return true;
 }
 
 async function acquireOwnerLock(
   candidateFile: string,
   lockFile: string,
   owner: OwnerFileSnapshot,
+  onRecoveryStep: (step: PidLockRecoveryStep) => Promise<void>,
+  log: (message: string) => void,
 ): Promise<void> {
   const fenceFile = `${lockFile}.reap`;
   for (;;) {
-    await rejectExistingLockFence(fenceFile);
+    if (await recoverExistingLockFence(lockFile, fenceFile, onRecoveryStep, log)) continue;
 
     try {
       await link(candidateFile, lockFile);
@@ -203,6 +229,7 @@ async function acquireOwnerLock(
 
     try {
       await link(lockFile, fenceFile);
+      await onRecoveryStep('fence-created');
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') continue;
@@ -220,7 +247,7 @@ async function acquireOwnerLock(
       await removeObservedOwnerFile(fenceFile, claimedFence);
       throw error;
     }
-    await finishFencedLockRecovery(lockFile, fenceFile, claimedFence);
+    await finishFencedLockRecovery(lockFile, fenceFile, claimedFence, onRecoveryStep);
   }
 }
 
@@ -241,6 +268,8 @@ interface PidOwnership {
 async function acquireOwnedPidFile(
   pidFile: string,
   beforePidFilePublication: () => Promise<void>,
+  onRecoveryStep: (step: PidLockRecoveryStep) => Promise<void>,
+  log: (message: string) => void,
 ): Promise<PidOwnership> {
   await mkdir(dirname(pidFile), { recursive: true });
   const lockFile = `${pidFile}.lock`;
@@ -258,7 +287,7 @@ async function acquireOwnedPidFile(
   let ownsLock = false;
 
   try {
-    await acquireOwnerLock(candidateFile, lockFile, owner);
+    await acquireOwnerLock(candidateFile, lockFile, owner, onRecoveryStep, log);
     ownsLock = true;
 
     await beforePidFilePublication();
@@ -484,6 +513,8 @@ export async function runSupervisor(options: SupervisorOptions = {}): Promise<vo
     pidOwnership = await acquireOwnedPidFile(
       pidFile,
       options.beforePidFilePublication ?? (async () => undefined),
+      options.onPidLockRecoveryStep ?? (async () => undefined),
+      log,
     );
     for (const spec of specs) {
       if (stopping) break;
