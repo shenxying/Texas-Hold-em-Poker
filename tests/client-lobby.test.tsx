@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/client/App';
@@ -108,10 +108,14 @@ class FakePokerClient implements PokerClient {
   }
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 beforeEach(() => {
   localStorage.clear();
+  history.replaceState({}, '', '/');
 });
 
 describe('lobby and browser session', () => {
@@ -123,8 +127,8 @@ describe('lobby and browser session', () => {
     await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
 
     expect(await screen.findByText('ABCD23')).toBeInTheDocument();
-    expect(screen.getByDisplayValue('http://192.168.1.8:3000/?room=ABCD23')).toBeInTheDocument();
-    expect(screen.queryByDisplayValue(/secret-token/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制邀请链接' })).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain('secret-token');
     expect(JSON.parse(localStorage.getItem('lan-poker-session')!)).toEqual({
       roomCode: 'ABCD23',
       sessionToken: 'secret-token',
@@ -144,9 +148,31 @@ describe('lobby and browser session', () => {
     await userEvent.type(screen.getByLabelText('昵称'), '小明');
     await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
 
-    expect(await screen.findByDisplayValue('http://host:8080/poker/?room=ABCD23'))
-      .toBeInTheDocument();
-    expect(screen.queryByDisplayValue(/secret-token/)).not.toBeInTheDocument();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    await userEvent.click(await screen.findByRole('button', { name: '复制邀请链接' }));
+    expect(writeText).toHaveBeenCalledWith('http://host:8080/poker/?room=ABCD23');
+    expect(await screen.findByText('邀请链接已复制')).toHaveAttribute('aria-live', 'polite');
+    expect(document.body.textContent).not.toContain('secret-token');
+  });
+
+  it('announces an invite-copy failure without exposing the URL', async () => {
+    const client = new FakePokerClient({ createRoom: hostSession });
+    render(<App client={client} locationHref="http://host/" />);
+    await userEvent.type(screen.getByLabelText('昵称'), '小明');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn().mockRejectedValue(new Error('denied')) },
+    });
+
+    await userEvent.click(await screen.findByRole('button', { name: '复制邀请链接' }));
+
+    expect(await screen.findByText('复制失败，请稍后重试')).toHaveAttribute('aria-live', 'polite');
+    expect(document.body.textContent).not.toContain('http://host/?room=ABCD23');
   });
 
   it('prefills and uppercases a room code from an invitation URL', () => {
@@ -268,6 +294,21 @@ describe('lobby and browser session', () => {
     expect(client.reconnect).toHaveBeenCalledTimes(1);
   });
 
+  it('shows session restoration feedback inside the home card', () => {
+    localStorage.setItem('lan-poker-session', JSON.stringify({
+      roomCode: 'ABCD23',
+      sessionToken: 'saved-token',
+    }));
+    const pending = deferred<SessionInfo>();
+    const client = new FakePokerClient({ reconnect: pending.promise });
+
+    render(<App client={client} locationHref="http://host/" />);
+
+    const home = screen.getByRole('region', { name: '局域网德州扑克' });
+    expect(within(home).getByText('正在恢复上次牌局…')).toHaveAttribute('aria-live', 'polite');
+    expect(within(home).getByLabelText('昵称')).toBeDisabled();
+  });
+
   it('announces connection loss without discarding server wording', async () => {
     const client = new FakePokerClient();
     render(<App client={client} locationHref="http://host/" />);
@@ -300,6 +341,136 @@ describe('lobby and browser session', () => {
 
     client.publish({ type: 'connection:state', state: 'connected' });
     expect(screen.queryByLabelText('昵称')).not.toBeInTheDocument();
+  });
+});
+
+describe('confirmed room exit navigation', () => {
+  async function enterRoom(
+    client: FakePokerClient,
+    view: TableView = tableView(),
+  ): Promise<void> {
+    render(<App client={client} basePath="/poker" locationHref={window.location.href} />);
+    await userEvent.type(screen.getByLabelText('昵称'), '房主');
+    await userEvent.click(screen.getByRole('button', { name: '创建私人房间' }));
+    await screen.findByText('ABCD23');
+    client.publish({ type: 'table:snapshot', view });
+    await screen.findByRole('button', { name: '退出房间' });
+  }
+
+  it('requires confirmation, warns about an immediate fold, and restores focus on cancel', async () => {
+    const client = new FakePokerClient();
+    await enterRoom(client, tableView({ phase: 'playing' }));
+
+    const trigger = screen.getByRole('button', { name: '退出房间' });
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole('alertdialog', { name: '确认退出房间' });
+    expect(within(dialog).getByText('退出将立即弃牌并离开房间。')).toBeInTheDocument();
+    expect(client.leaveRoom).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus();
+    expect(document.querySelector('.app-shell')).toHaveAttribute('inert');
+
+    await userEvent.tab({ shift: true });
+    expect(within(dialog).getByRole('button', { name: '确认退出' })).toHaveFocus();
+    await userEvent.tab();
+    expect(within(dialog).getByRole('button', { name: '取消' })).toHaveFocus();
+
+    await userEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(document.querySelector('.app-shell')).not.toHaveAttribute('inert');
+    expect(trigger).toHaveFocus();
+  });
+
+  it('closes the confirmation with Escape outside a pending request', async () => {
+    const client = new FakePokerClient();
+    await enterRoom(client);
+    const trigger = screen.getByRole('button', { name: '退出房间' });
+    await userEvent.click(trigger);
+    expect(screen.getByText('确定退出当前房间吗？')).toBeInTheDocument();
+
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it('sends one confirmed leave, clears session and room query, and returns home', async () => {
+    history.replaceState({}, '', '/poker/?room=ABCD23&keep=yes');
+    const pending = deferred<void>();
+    const client = new FakePokerClient();
+    client.leaveRoom.mockReturnValue(pending.promise);
+    await enterRoom(client);
+
+    await userEvent.click(screen.getByRole('button', { name: '退出房间' }));
+    const confirm = screen.getByRole('button', { name: '确认退出' });
+    expect(confirm).toHaveClass('danger-button');
+    await userEvent.click(confirm);
+    await userEvent.click(confirm);
+    expect(client.leaveRoom).toHaveBeenCalledTimes(1);
+    expect(client.leaveRoom).toHaveBeenCalledWith(false);
+    expect(confirm).toBeDisabled();
+
+    pending.resolve();
+    expect(await screen.findByRole('heading', { name: '局域网德州扑克' })).toBeInTheDocument();
+    expect(localStorage.getItem('lan-poker-session')).toBeNull();
+    expect(window.location.pathname + window.location.search).toBe('/poker/?keep=yes');
+  });
+
+  it('returns home even when browser storage cleanup throws after server leave', async () => {
+    const client = new FakePokerClient();
+    await enterRoom(client);
+    vi.spyOn(Storage.prototype, 'removeItem').mockImplementation(() => {
+      throw new Error('storage unavailable');
+    });
+
+    await userEvent.click(screen.getByRole('button', { name: '退出房间' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认退出' }));
+
+    expect(await screen.findByRole('heading', { name: '局域网德州扑克' })).toBeInTheDocument();
+  });
+
+  it('keeps the room and stored session when a connected leave is rejected', async () => {
+    const client = new FakePokerClient();
+    client.leaveRoom.mockRejectedValue(new Error('暂时无法退出房间'));
+    await enterRoom(client);
+
+    await userEvent.click(screen.getByRole('button', { name: '退出房间' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认退出' }));
+
+    const dialog = screen.getByRole('alertdialog', { name: '确认退出房间' });
+    expect(await within(dialog).findByText('暂时无法退出房间'))
+      .toHaveAttribute('aria-live', 'assertive');
+    expect(screen.getByText('ABCD23')).toBeInTheDocument();
+    expect(localStorage.getItem('lan-poker-session')).not.toBeNull();
+  });
+
+  it('leaves locally while disconnected and does not wait for a server command', async () => {
+    const client = new FakePokerClient();
+    await enterRoom(client);
+    client.publish({ type: 'connection:state', state: 'disconnected' });
+    await screen.findByText('服务器连接已断开');
+
+    await userEvent.click(screen.getByRole('button', { name: '退出房间' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认退出' }));
+
+    expect(client.leaveRoom).toHaveBeenCalledWith(true);
+    expect(await screen.findByRole('heading', { name: '局域网德州扑克' })).toBeInTheDocument();
+  });
+
+  it('falls back to a local leave when the transport drops before acknowledgement', async () => {
+    const pending = deferred<void>();
+    const client = new FakePokerClient();
+    client.leaveRoom.mockImplementation((localOnly = false) => (
+      localOnly ? Promise.resolve() : pending.promise
+    ));
+    await enterRoom(client);
+
+    await userEvent.click(screen.getByRole('button', { name: '退出房间' }));
+    await userEvent.click(screen.getByRole('button', { name: '确认退出' }));
+    expect(client.leaveRoom).toHaveBeenCalledWith(false);
+
+    client.publish({ type: 'connection:state', state: 'reconnecting' });
+
+    await waitFor(() => expect(client.leaveRoom).toHaveBeenCalledWith(true));
+    expect(await screen.findByRole('heading', { name: '局域网德州扑克' })).toBeInTheDocument();
   });
 });
 

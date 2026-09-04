@@ -4,6 +4,7 @@ import type { SessionInfo, TableView } from '../shared/protocol';
 import { Lobby } from './Lobby';
 import { PokerRoom } from './PokerRoom';
 import { RoomControls } from './RoomControls';
+import { RoomHeader } from './RoomHeader';
 import type { ConnectionState, PokerClient } from './socket';
 
 const SESSION_KEY = 'lan-poker-session';
@@ -75,15 +76,20 @@ export function App({
     () => new URL(locationHref).searchParams.get('room')?.trim().toUpperCase() ?? '',
     [locationHref],
   );
+  const [lobbyRoomCode, setLobbyRoomCode] = useState(initialRoomCode);
   const savedSession = useRef(readSavedSession());
   const restoreAttempted = useRef(false);
   const [session, setSession] = useState<SessionInfo>();
   const [view, setView] = useState<TableView>();
   const [error, setError] = useState('');
   const [connectionState, setConnectionState] = useState<ConnectionState>('connected');
+  const connectionStateRef = useRef<ConnectionState>('connected');
   const [lobbyPending, setLobbyPending] = useState(false);
   const [restoring, setRestoring] = useState(savedSession.current !== undefined);
   const [replaced, setReplaced] = useState(false);
+  const [leaving, setLeaving] = useState(false);
+  const leavePending = useRef(false);
+  const interruptLeave = useRef<(() => void) | undefined>(undefined);
 
   useEffect(() => client.subscribe((event) => {
     if (event.type === 'table:snapshot') {
@@ -104,7 +110,9 @@ export function App({
       return;
     }
     if (event.type === 'connection:state') {
+      connectionStateRef.current = event.state;
       setConnectionState(event.state);
+      if (event.state !== 'connected') interruptLeave.current?.();
       return;
     }
     setReplaced(true);
@@ -133,6 +141,60 @@ export function App({
     setError('');
   }
 
+  function returnHome(): void {
+    savedSession.current = undefined;
+    try {
+      storage()?.removeItem(SESSION_KEY);
+    } catch {
+      // Storage cleanup is best-effort; in-memory logout must still complete.
+    }
+    setSession(undefined);
+    setView(undefined);
+    setError('');
+    setRestoring(false);
+    setLobbyRoomCode('');
+
+    try {
+      const current = new URL(globalThis.location?.href ?? locationHref);
+      current.searchParams.delete('room');
+      globalThis.history?.replaceState(
+        null,
+        '',
+        `${current.pathname}${current.search}${current.hash}`,
+      );
+    } catch {
+      // A restricted browser history must not prevent returning to the lobby.
+    }
+  }
+
+  async function leaveRoom(): Promise<void> {
+    if (leavePending.current) return;
+    leavePending.current = true;
+    setLeaving(true);
+    try {
+      if (connectionStateRef.current !== 'connected') {
+        await client.leaveRoom(true);
+      } else {
+        const interrupted = new Promise<void>((resolve) => {
+          interruptLeave.current = resolve;
+        });
+        const outcome = await Promise.race([
+          client.leaveRoom(false).then(() => 'acknowledged' as const),
+          interrupted.then(() => 'offline' as const),
+        ]);
+        if (outcome === 'offline') await client.leaveRoom(true);
+      }
+      returnHome();
+    } catch (leaveError) {
+      setError(leaveError instanceof Error ? leaveError.message : '暂时无法退出房间');
+      throw leaveError;
+    } finally {
+      interruptLeave.current = undefined;
+      leavePending.current = false;
+      setLeaving(false);
+    }
+  }
+
   const statusMessage = connectionMessage(connectionState);
   return (
     <main className="app-shell">
@@ -143,52 +205,53 @@ export function App({
         </section>
       ) : (
         <>
-          {statusMessage !== '' && (
-            <p className="connection-banner" aria-live="polite">{statusMessage}</p>
-          )}
-          {error !== '' && <p className="error-banner" aria-live="polite">{error}</p>}
-
           {session === undefined ? (
             <Lobby
               client={client}
-              initialRoomCode={initialRoomCode}
+              initialRoomCode={lobbyRoomCode}
               disabled={restoring || lobbyPending || connectionState !== 'connected'}
               onPendingChange={setLobbyPending}
               onSession={acceptSession}
               onError={setError}
+              restoring={restoring}
+              statusMessage={statusMessage}
+              errorMessage={error}
             />
           ) : (
-            <section className="room-summary" aria-labelledby="room-title">
-              <h1 id="room-title">私人房间</h1>
-              <div className="invite-strip">
-                <span>房间码</span>
-                <strong className="room-code">{session.roomCode}</strong>
-                <label htmlFor="invite-url">邀请链接</label>
-                <input
-                  id="invite-url"
-                  readOnly
-                  value={inviteFor(locationHref, basePath, session.roomCode)}
-                />
-              </div>
-              {view !== undefined && (
-                <>
-                  <PokerRoom
-                    client={client}
-                    view={view}
-                    playerId={session.playerId}
-                    connected={connectionState === 'connected'}
-                    onError={setError}
-                  />
-                  <RoomControls
-                    client={client}
-                    view={view}
-                    playerId={session.playerId}
-                    connected={connectionState === 'connected'}
-                    onError={setError}
-                  />
-                </>
+            <>
+              {statusMessage !== '' && (
+                <p className="connection-banner" aria-live="polite">{statusMessage}</p>
               )}
-            </section>
+              {error !== '' && <p className="error-banner" aria-live="polite">{error}</p>}
+              <section className="room-summary" aria-label="私人房间">
+                <RoomHeader
+                  roomCode={session.roomCode}
+                  inviteUrl={inviteFor(locationHref, basePath, session.roomCode)}
+                  connected={connectionState === 'connected'}
+                  playing={view?.phase === 'playing'}
+                  leaving={leaving}
+                  onLeave={leaveRoom}
+                />
+                {view !== undefined && (
+                  <>
+                    <PokerRoom
+                      client={client}
+                      view={view}
+                      playerId={session.playerId}
+                      connected={connectionState === 'connected'}
+                      onError={setError}
+                    />
+                    <RoomControls
+                      client={client}
+                      view={view}
+                      playerId={session.playerId}
+                      connected={connectionState === 'connected'}
+                      onError={setError}
+                    />
+                  </>
+                )}
+              </section>
+            </>
           )}
         </>
       )}

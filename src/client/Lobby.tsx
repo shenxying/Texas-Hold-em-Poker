@@ -9,6 +9,9 @@ interface LobbyProps {
   onPendingChange: (pending: boolean) => void;
   onSession: (session: SessionInfo) => void;
   onError: (message: string) => void;
+  restoring: boolean;
+  statusMessage: string;
+  errorMessage: string;
 }
 
 function normalizedNickname(value: string): string | undefined {
@@ -30,6 +33,9 @@ export function Lobby({
   onPendingChange,
   onSession,
   onError,
+  restoring,
+  statusMessage,
+  errorMessage: serverError,
 }: LobbyProps): React.JSX.Element {
   const [nickname, setNickname] = useState('');
   const [roomCode, setRoomCode] = useState(initialRoomCode);
@@ -68,45 +74,73 @@ export function Lobby({
   const formDisabled = disabled || pendingAction !== null;
   return (
     <section className="lobby" aria-labelledby="lobby-title">
-      <h1 id="lobby-title">局域网德州扑克</h1>
-      <form onSubmit={(event) => void submit(
+      <header className="lobby-intro">
+        <p className="eyebrow">私人牌局 · 局域网畅玩</p>
+        <h1 id="lobby-title">局域网德州扑克</h1>
+        <p>创建一个只属于朋友们的房间，或输入邀请中的房间码直接入座。</p>
+      </header>
+      <div className="lobby-feedback" aria-atomic="true">
+        {restoring && (
+          <p className="connection-banner" aria-live="polite">正在恢复上次牌局…</p>
+        )}
+        {!restoring && statusMessage !== '' && (
+          <p className="connection-banner" aria-live="polite">{statusMessage}</p>
+        )}
+        {serverError !== '' && (
+          <p className="error-banner" aria-live="polite">{serverError}</p>
+        )}
+      </div>
+      <form className="lobby-form" onSubmit={(event) => void submit(
         roomCode.trim().length > 0 ? 'join' : 'create',
         event,
       )}>
         <button type="submit" hidden tabIndex={-1} aria-hidden="true" />
-        <label htmlFor="nickname">昵称</label>
-        <input
-          id="nickname"
-          value={nickname}
-          onChange={(event) => setNickname(event.target.value)}
-          disabled={formDisabled}
-          aria-describedby={nicknameHelp === '' ? undefined : 'nickname-help'}
-        />
-        {nicknameHelp !== '' && <p id="nickname-help" className="field-help">{nicknameHelp}</p>}
+        <div className="lobby-identity">
+          <label htmlFor="nickname">昵称</label>
+          <input
+            id="nickname"
+            value={nickname}
+            onChange={(event) => setNickname(event.target.value)}
+            disabled={formDisabled}
+            autoComplete="nickname"
+            placeholder="你在牌桌上的名字"
+            aria-describedby={nicknameHelp === '' ? undefined : 'nickname-help'}
+          />
+          {nicknameHelp !== '' && <p id="nickname-help" className="field-help">{nicknameHelp}</p>}
+        </div>
 
-        <button
-          type="button"
-          disabled={formDisabled}
-          onClick={(event) => void submit('create', event)}
-        >
-          {pendingAction === 'create' ? '创建中…' : '创建私人房间'}
-        </button>
+        <section className="lobby-choice" aria-labelledby="create-room-title">
+          <h2 id="create-room-title">创建新牌局</h2>
+          <p>生成一个房间码，再把邀请链接发给朋友。</p>
+          <button
+            type="button"
+            disabled={formDisabled}
+            onClick={(event) => void submit('create', event)}
+          >
+            {pendingAction === 'create' ? '创建中…' : '创建私人房间'}
+          </button>
+        </section>
 
-        <label htmlFor="room-code">房间码</label>
-        <input
-          id="room-code"
-          value={roomCode}
-          onChange={(event) => setRoomCode(event.target.value.toUpperCase())}
-          autoCapitalize="characters"
-          disabled={formDisabled}
-        />
-        <button
-          type="button"
-          disabled={formDisabled}
-          onClick={(event) => void submit('join', event)}
-        >
-          {pendingAction === 'join' ? '加入中…' : '加入私人房间'}
-        </button>
+        <section className="lobby-choice" aria-labelledby="join-room-title">
+          <h2 id="join-room-title">加入朋友的牌局</h2>
+          <label htmlFor="room-code">房间码</label>
+          <input
+            id="room-code"
+            value={roomCode}
+            onChange={(event) => setRoomCode(event.target.value.toUpperCase())}
+            autoCapitalize="characters"
+            autoComplete="off"
+            placeholder="例如 ABCD23"
+            disabled={formDisabled}
+          />
+          <button
+            type="button"
+            disabled={formDisabled}
+            onClick={(event) => void submit('join', event)}
+          >
+            {pendingAction === 'join' ? '加入中…' : '加入私人房间'}
+          </button>
+        </section>
       </form>
     </section>
   );
