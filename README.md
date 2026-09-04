@@ -78,3 +78,23 @@ npm start
 ## 验收说明
 
 自动化测试覆盖双客户端创建/加入、聊天、开局、行动、超时、AI、隐私投影、断线重连、健康检查和生产静态页面。当前开发环境没有可控制的第二台实体手机，因此“手机与电脑处于同一局域网”的现场连通性，以及企业 Wi-Fi 是否存在客户端隔离，仍需在实际网络中按上面的生产模式步骤验证；本项目没有伪造该项结果，也没有修改系统防火墙。
+
+## 共享 8080 部署
+
+当前环境通过一个共享网关保留 Drawing API 的既有外部地址
+`http://10.191.46.7:8091`，并在 `http://10.191.46.7:8091/poker/` 提供牌桌。该端口映射
+是环境特定的；容器内的健康检查仍使用 `http://127.0.0.1:8080`。Drawing 的 `/live`、
+`/ready` 和 `/api/v1/...` 等路径保持不变。
+
+```bash
+cd /home/sxy/lan-texas-holdem/.worktrees/lan-poker
+VITE_BASE_PATH=/poker/ npm run build
+npm run shared -- start
+npm run shared -- status
+npm run shared -- stop
+```
+
+共享运行时把 Drawing 绑定到 loopback `18080`、Poker 绑定到 loopback `3000`，仅 gateway
+监听 `0.0.0.0:8080`。不得同时运行两个访问同一本地 Qdrant 的 Drawing 进程，也不得修改既有
+Drawing 数据、模型或密钥。首次切换、完整验收与 exact-PID 回滚步骤见
+[共享 8080 网关运维手册](docs/shared-8080-runbook.md)。
