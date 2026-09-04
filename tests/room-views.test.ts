@@ -227,6 +227,87 @@ describe('room service and views', () => {
     expectCode(() => rooms.reconnect(host.sessionToken), 'INVALID_SESSION');
   });
 
+  it('removes a seated guest immediately and invalidates its session', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    const guest = rooms.joinRoom({ roomCode: host.roomCode, nickname: '朋友' });
+
+    const events = rooms.leave(guest.sessionToken, 1_000);
+
+    expect(events).toContainEqual({
+      type: 'player-left',
+      roomCode: host.roomCode,
+      playerId: guest.playerId,
+    });
+    expect(rooms.getRoom(host.roomCode)!.seats).not.toContainEqual(
+      expect.objectContaining({ id: guest.playerId }),
+    );
+    expect(() => rooms.reconnect(guest.sessionToken)).toThrowError('Session does not exist');
+  });
+
+  it('removes a waiting guest without changing the seated table', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    for (let index = 1; index <= 6; index += 1) {
+      rooms.joinRoom({ roomCode: host.roomCode, nickname: `玩家${index}` });
+    }
+    rooms.addBot(host.sessionToken, 'tight');
+    rooms.addBot(host.sessionToken, 'aggressive');
+    const waiter = rooms.joinRoom({ roomCode: host.roomCode, nickname: '等待玩家' });
+
+    const events = rooms.leave(waiter.sessionToken, 1_000);
+
+    expect(events).toContainEqual({
+      type: 'player-left',
+      roomCode: host.roomCode,
+      playerId: waiter.playerId,
+    });
+    expect(rooms.getRoom(host.roomCode)!.waiting).toEqual([]);
+    expect(rooms.getRoom(host.roomCode)!.seats).toHaveLength(9);
+  });
+
+  it('transfers a departing host to the earliest joined connected human', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    const offlineGuest = rooms.joinRoom({ roomCode: host.roomCode, nickname: '离线朋友' });
+    rooms.addBot(host.sessionToken, 'balanced');
+    const onlineGuest = rooms.joinRoom({ roomCode: host.roomCode, nickname: '在线朋友' });
+    rooms.disconnect(offlineGuest.sessionToken, 999);
+
+    const events = rooms.leave(host.sessionToken, 1_000);
+
+    expect(rooms.getRoom(host.roomCode)!.hostPlayerId).toBe(onlineGuest.playerId);
+    expect(events).toContainEqual({
+      type: 'host-transferred',
+      roomCode: host.roomCode,
+      playerId: onlineGuest.playerId,
+    });
+  });
+
+  it('promotes a waiter when a seated human leaves between hands', () => {
+    const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
+    const host = rooms.createRoom({ nickname: '房主' });
+    const guests = Array.from({ length: 6 }, (_, index) =>
+      rooms.joinRoom({ roomCode: host.roomCode, nickname: `玩家${index + 1}` }),
+    );
+    rooms.addBot(host.sessionToken, 'tight');
+    rooms.addBot(host.sessionToken, 'aggressive');
+    const waiter = rooms.joinRoom({ roomCode: host.roomCode, nickname: '等待玩家' });
+    const room = rooms.getRoom(host.roomCode)!;
+    room.phase = 'between-hands';
+
+    const events = rooms.leave(guests[0]!.sessionToken, 1_000);
+
+    expect(room.waiting).toEqual([]);
+    expect(room.seats[1]).toMatchObject({ id: waiter.playerId, seatIndex: 1 });
+    expect(events).toContainEqual({
+      type: 'player-seated',
+      roomCode: room.code,
+      playerId: waiter.playerId,
+      seatIndex: 1,
+    });
+  });
+
   it('keeps zero-stack humans seated and lets only the host reset them between hands', () => {
     const rooms = new RoomService({ randomCode: () => 'ABCD23', randomToken: values('token') });
     const host = rooms.createRoom({ nickname: '房主' });

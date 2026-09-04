@@ -290,9 +290,13 @@ export class RoomService {
     player.disconnectedAt = now;
   }
 
+  leave(sessionToken: string, now: number): RoomEvent[] {
+    const { room, player } = this.requireSession(sessionToken);
+    return this.removeHuman(sessionToken, room, player, now);
+  }
+
   expireDisconnected(now: number): RoomEvent[] {
     const events: RoomEvent[] = [];
-    const affectedRooms = new Set<Room>();
     for (const [sessionToken, { room, player }] of [...this.sessions]) {
       if (
         player.connected ||
@@ -301,40 +305,7 @@ export class RoomService {
       ) {
         continue;
       }
-
-      this.sessions.delete(sessionToken);
-      const seatIndex = room.seats.indexOf(player);
-      if (seatIndex !== -1) room.seats[seatIndex] = null;
-      const waitingIndex = room.waiting.indexOf(player);
-      if (waitingIndex !== -1) room.waiting.splice(waitingIndex, 1);
-      if (room.hostPlayerId === player.id) room.hostPlayerId = undefined;
-      events.push({ type: 'player-left', roomCode: room.code, playerId: player.id });
-      this.appendSystemEvent(room, { type: 'player-left', nickname: player.nickname }, now);
-      affectedRooms.add(room);
-    }
-
-    for (const room of affectedRooms) {
-      if (allHumans(room).length === 0) {
-        this.rooms.delete(room.code);
-        this.chat.clear(room.code);
-        events.push({ type: 'room-destroyed', roomCode: room.code });
-        continue;
-      }
-      if (room.phase !== 'playing') events.push(...this.promoteWaiting(room, now));
-      if (room.hostPlayerId === undefined) {
-        const nextHost = seatedPlayers(room)
-          .filter((player) => !player.isBot && player.connected)
-          .sort((left, right) => left.joinedOrder - right.joinedOrder)[0];
-        if (nextHost) {
-          room.hostPlayerId = nextHost.id;
-          events.push({ type: 'host-transferred', roomCode: room.code, playerId: nextHost.id });
-          this.appendSystemEvent(
-            room,
-            { type: 'host-transferred', nickname: nextHost.nickname },
-            now,
-          );
-        }
-      }
+      events.push(...this.removeHuman(sessionToken, room, player, now));
     }
     return events;
   }
@@ -450,25 +421,48 @@ export class RoomService {
         seatIndex,
       });
     }
-    if (room.hostPlayerId === undefined) {
-      const nextHost = seatedPlayers(room)
-        .filter((player) => !player.isBot && player.connected)
-        .sort((left, right) => left.joinedOrder - right.joinedOrder)[0];
-      if (nextHost) {
-        room.hostPlayerId = nextHost.id;
-        events.push({
-          type: 'host-transferred',
-          roomCode: room.code,
-          playerId: nextHost.id,
-        });
-        this.appendSystemEvent(
-          room,
-          { type: 'host-transferred', nickname: nextHost.nickname },
-          now,
-        );
-      }
-    }
+    events.push(...this.transferHost(room, now));
     return events;
+  }
+
+  private removeHuman(
+    sessionToken: string,
+    room: Room,
+    player: RoomPlayer,
+    now: number,
+  ): RoomEvent[] {
+    this.sessions.delete(sessionToken);
+    const seatIndex = room.seats.indexOf(player);
+    if (seatIndex !== -1) room.seats[seatIndex] = null;
+    const waitingIndex = room.waiting.indexOf(player);
+    if (waitingIndex !== -1) room.waiting.splice(waitingIndex, 1);
+    if (room.hostPlayerId === player.id) room.hostPlayerId = undefined;
+
+    const events: RoomEvent[] = [{ type: 'player-left', roomCode: room.code, playerId: player.id }];
+    this.appendSystemEvent(room, { type: 'player-left', nickname: player.nickname }, now);
+
+    if (allHumans(room).length === 0) {
+      this.rooms.delete(room.code);
+      this.chat.clear(room.code);
+      events.push({ type: 'room-destroyed', roomCode: room.code });
+      return events;
+    }
+
+    if (room.phase !== 'playing') events.push(...this.promoteWaiting(room, now));
+    else events.push(...this.transferHost(room, now));
+    return events;
+  }
+
+  private transferHost(room: Room, now: number): RoomEvent[] {
+    if (room.hostPlayerId !== undefined) return [];
+    const nextHost = seatedPlayers(room)
+      .filter((player) => !player.isBot && player.connected)
+      .sort((left, right) => left.joinedOrder - right.joinedOrder)[0];
+    if (!nextHost) return [];
+
+    room.hostPlayerId = nextHost.id;
+    this.appendSystemEvent(room, { type: 'host-transferred', nickname: nextHost.nickname }, now);
+    return [{ type: 'host-transferred', roomCode: room.code, playerId: nextHost.id }];
   }
 
   getRoom(roomCode: string): Room | undefined {

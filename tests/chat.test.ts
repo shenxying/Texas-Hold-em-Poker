@@ -181,4 +181,21 @@ describe('room chat', () => {
     expect(rooms.getRoom(host.roomCode)!.hostPlayerId).toBe(guest.playerId);
     expect(transfers).toHaveLength(1);
   });
+
+  it('clears chat when the final human explicitly leaves', () => {
+    const chat = new ChatService();
+    const rooms = new RoomService({
+      chat,
+      randomCode: () => 'ABCD23',
+      randomToken: () => 'host-token',
+    });
+    const host = rooms.createRoom({ nickname: '房主' });
+    rooms.sendChat(host.sessionToken, '再见', 1_000);
+
+    const events = rooms.leave(host.sessionToken, 1_001);
+
+    expect(events).toContainEqual({ type: 'room-destroyed', roomCode: host.roomCode });
+    expect(rooms.getRoom(host.roomCode)).toBeUndefined();
+    expect(chat.history(host.roomCode)).toEqual([]);
+  });
 });
